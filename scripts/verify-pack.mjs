@@ -3,13 +3,19 @@
  * Pack the package into a tarball, install it into a throwaway project, and
  * assert that:
  *   1. dist/index.d.ts ships inside the tarball.
- *   2. CommonJS `require()` exposes the named exports.
- *   3. Native ESM `import { ... }` resolves the same names (catches the
- *      "member-expression export" bug where cjs-module-lexer can't see the
- *      names for ESM consumers).
+ *   2. CommonJS `require()` exposes the named exports, on both the main
+ *      entry (`.`) and the `./conformance` subpath.
+ *   3. Native ESM `import { ... }` resolves the same names on both entry
+ *      points (catches the "member-expression export" bug where
+ *      cjs-module-lexer can't see the names for ESM consumers).
  *
- * webhook-kit has ZERO runtime dependencies (Node `crypto` + global `fetch`),
- * so the throwaway consumer installs only the tarball.
+ * `./conformance` deliberately does NOT import `vitest` (vitest ships
+ * ESM-only — no CJS `require()` entry point at all — so a static import
+ * would break this package for any consumer resolving it via CJS). Instead
+ * it takes `describe`/`it`/`expect` as parameters, injected by the caller's
+ * own already-working test file — same idiom as the injected `bcrypt`. That
+ * keeps the WHOLE package, including `./conformance`, at ZERO runtime
+ * dependencies, so one zero-dep consumer below proves both entry points.
  *
  * Exits non-zero with a clear message on any failure.
  */
@@ -80,32 +86,43 @@ try {
   run('npm', ['install', '--no-audit', '--no-fund', tarballPath], { cwd: consumerDir, stdio: 'inherit' });
 
   const names = JSON.stringify(EXPECTED);
+  const conformanceNames = JSON.stringify(['runRefreshTokenStoreConformanceTests']);
 
-  // 2. CommonJS require smoke.
+  // 2. CommonJS require smoke — main entry and ./conformance.
   const cjsSmoke = `
     const mod = require('${pkg.name}');
     const missing = ${names}.filter((n) => typeof mod[n] !== 'function');
     if (missing.length) { console.error('CJS missing exports: ' + missing.join(', ')); process.exit(2); }
+
+    const conformanceMod = require('${pkg.name}/conformance');
+    const missingConformance = ${conformanceNames}.filter((n) => typeof conformanceMod[n] !== 'function');
+    if (missingConformance.length) { console.error('CJS missing ./conformance exports: ' + missingConformance.join(', ')); process.exit(3); }
+
     console.log('CJS OK');
   `;
   writeFileSync(join(consumerDir, 'smoke.cjs'), cjsSmoke);
   if (!run('node', ['smoke.cjs'], { cwd: consumerDir }).includes('CJS OK')) {
     fail('CommonJS smoke did not report OK');
   }
-  console.log('[verify:pack] OK: CommonJS require exposes named exports');
+  console.log('[verify:pack] OK: CommonJS require exposes named exports (main entry + ./conformance)');
 
-  // 3. Native ESM import smoke.
+  // 3. Native ESM import smoke — main entry and ./conformance.
   const esmSmoke = `
     import * as mod from '${pkg.name}';
     const missing = ${names}.filter((n) => typeof mod[n] !== 'function');
     if (missing.length) { console.error('ESM missing: ' + missing.join(', ')); process.exit(5); }
+
+    import * as conformanceMod from '${pkg.name}/conformance';
+    const missingConformance = ${conformanceNames}.filter((n) => typeof conformanceMod[n] !== 'function');
+    if (missingConformance.length) { console.error('ESM missing ./conformance: ' + missingConformance.join(', ')); process.exit(6); }
+
     console.log('ESM OK');
   `;
   writeFileSync(join(consumerDir, 'smoke.mjs'), esmSmoke);
   if (!run('node', ['smoke.mjs'], { cwd: consumerDir }).includes('ESM OK')) {
     fail('ESM smoke did not report OK');
   }
-  console.log('[verify:pack] OK: ESM named imports resolve');
+  console.log('[verify:pack] OK: ESM named imports resolve (main entry + ./conformance)');
 
   console.log('\n[verify:pack] PASS: all checks green');
 } finally {

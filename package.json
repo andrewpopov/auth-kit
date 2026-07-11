@@ -1,12 +1,15 @@
 {
   "name": "@andrewpopov/auth-kit",
-  "version": "0.2.0",
-  "description": "Authentication primitives: bcrypt password hashing (injected impl, cost 12, optional SHA-256 pre-hash + timing-safe dummy hash), single-use SHA-256 opaque tokens (reset/invite/email-change), and refresh-token session rotation with reuse detection (injected storage port, family-kill-on-replay, epoch-based global invalidation, benign-race grace window). Pure and stateless — storage, RBAC, and the JWT library stay app-specific.",
+  "version": "0.2.1",
+  "description": "Authentication primitives: bcrypt password hashing (injected impl, cost 12, optional SHA-256 pre-hash + timing-safe dummy hash), single-use SHA-256 opaque tokens (reset/invite/email-change) — both pure and stateless — and refresh-token session rotation with reuse detection: a stateful protocol (family-kill-on-replay, epoch-based global invalidation, opt-in benign-race grace window) run against an injected `RefreshTokenStore` port. Storage, RBAC, and the JWT library stay app-specific. Ships an adapter conformance test suite (`/conformance`) for verifying a real store's atomicity.",
   "author": "Andrew Popov",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./conformance": { "types": "./dist/conformance.d.ts", "default": "./dist/conformance.js" }
+  },
   "files": ["dist"],
   "engines": { "node": ">=20" },
   "scripts": {
