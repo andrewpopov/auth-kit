@@ -29,6 +29,11 @@ const EXPECTED = [
   'hashResetToken',
   'prehashPassword',
   'createPasswordHasher',
+  'createRefreshToken',
+  'rotateRefreshToken',
+  'revokeRefreshToken',
+  'isEpochValid',
+  'createMemoryRefreshTokenStore',
 ];
 
 function run(cmd, args, opts = {}) {
