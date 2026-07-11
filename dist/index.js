@@ -18,9 +18,12 @@ const crypto_1 = __importDefault(require("crypto"));
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
- * outside express-security-kit's scope. Pure and stateless: password hashing and
- * single-use opaque tokens. The RBAC models, refresh-token stores, and 2FA flows
- * genuinely differ per app and are deliberately NOT here.
+ * outside express-security-kit's scope. Password hashing and single-use opaque
+ * tokens are pure and stateless. Refresh-token session rotation (below) is NOT
+ * stateless — it is a stateful protocol run against an injected
+ * `RefreshTokenStore` port; auth-kit owns the algorithm, never the storage
+ * engine. The RBAC models, JWT library, and 2FA flows genuinely differ per app
+ * and are deliberately NOT here.
  *
  * bcrypt is INJECTED (not bundled): the native-`bcrypt` apps keep their library,
  * levelup keeps `bcryptjs`, and the package forces no implementation on anyone.
@@ -83,7 +86,16 @@ function createPasswordHasher(options) {
         },
     };
 }
-/** Two presentations of the same token within this many ms of its rotation are treated as a benign multi-tab race, not theft. sano-os's value. */
+/**
+ * Two presentations of the same token within this many ms of its rotation MAY
+ * be treated as a benign multi-tab race instead of theft (sano-os's value) —
+ * but only if a consumer opts in via `{ graceMs: DEFAULT_ROTATION_GRACE_MS }`.
+ * NOT the default (see {@link rotateRefreshToken}): a grace window is an
+ * explicit reuse-detection bypass traded for UX, and a stolen token replayed
+ * inside it is laundered into a legitimate-looking sibling session with
+ * nothing revoked or flagged. cairn deliberately refuses this trade. A
+ * security default must be the strict one.
+ */
 exports.DEFAULT_ROTATION_GRACE_MS = 30000;
 /** Issue a fresh refresh token, starting a new family (login/register/reauthentication). */
 async function createRefreshToken(store, userId, ttlMs, options) {
@@ -107,32 +119,40 @@ async function createRefreshToken(store, userId, ttlMs, options) {
  *
  * - Unknown or expired token -> `invalid` (can't be attributed to a family;
  *   nothing to revoke — mirrors cairn's reasoning).
- * - Already-revoked token presented again:
+ * - Already-revoked token presented again — the store's `rotate()` makes this
+ *   call ATOMICALLY (see {@link RefreshTokenStore.rotate}; this used to be a
+ *   decide-in-JS-then-act-as-a-second-call sequence and that was a TOCTOU —
+ *   fixed in 0.2.1, see CHANGELOG):
  *   - within `graceMs` of its rotation AND its replacement is still active ->
- *     a benign concurrent refresh (two tabs) — mints a fresh SIBLING token in
- *     the SAME family and does NOT revoke anything. This is sano-os's grace
- *     window; it is the property that will bite real users if it regresses.
+ *     a benign concurrent refresh (two tabs) — a fresh SIBLING token in the
+ *     SAME family was minted and nothing else was revoked. This is sano-os's
+ *     grace window, OPT-IN only (see `graceMs` below).
  *   - otherwise -> genuine reuse (a stolen/replayed token, or a token
- *     revoked by logout) — the WHOLE family is revoked and `reuse` is
+ *     revoked by logout) — the WHOLE family was revoked and `reuse` is
  *     returned.
  * - Otherwise -> the CAS wins: the old token is marked revoked+replaced, a
  *   new token is issued in the same family -> `rotated`.
+ *
+ * `graceMs` defaults to `0` (strict — cairn/mizen's behavior: any replay of
+ * an already-rotated token is reuse, full stop). Passing
+ * `DEFAULT_ROTATION_GRACE_MS` opts into sano-os's 30s benign-race window,
+ * which is a real, honest security/UX trade: a stolen token replayed inside
+ * that window is issued a fresh, valid sibling and nothing is flagged — the
+ * theft is laundered into a legitimate-looking session. Opt in only with eyes
+ * open (see README).
  */
 async function rotateRefreshToken(store, rawToken, ttlMs, options) {
     const now = options?.now ?? new Date();
-    const graceMs = options?.graceMs ?? exports.DEFAULT_ROTATION_GRACE_MS;
+    const graceMs = options?.graceMs ?? 0;
     const oldTokenHash = hashOpaqueToken(rawToken);
     const rawNext = generateOpaqueToken();
-    const result = await store.rotate(oldTokenHash, {
-        id: crypto_1.default.randomUUID(),
-        tokenHash: hashOpaqueToken(rawNext),
-        expiresAt: new Date(now.getTime() + ttlMs),
-    });
+    const result = await store.rotate(oldTokenHash, { id: crypto_1.default.randomUUID(), tokenHash: hashOpaqueToken(rawNext), expiresAt: new Date(now.getTime() + ttlMs) }, { graceMs, now });
     switch (result.status) {
         case 'not-found':
         case 'expired':
             return { outcome: 'invalid' };
         case 'rotated':
+        case 'benign-race':
             return {
                 outcome: 'rotated',
                 userId: result.session.userId,
@@ -140,25 +160,8 @@ async function rotateRefreshToken(store, rawToken, ttlMs, options) {
                 rawToken: rawNext,
                 expiresAt: result.session.expiresAt,
             };
-        case 'already-revoked': {
-            const revokedAgeMs = result.old.revokedAt ? now.getTime() - result.old.revokedAt.getTime() : Infinity;
-            const withinGrace = graceMs > 0 && revokedAgeMs >= 0 && revokedAgeMs <= graceMs;
-            const replacementActive = result.replacement !== null &&
-                result.replacement.revokedAt === null &&
-                result.replacement.expiresAt.getTime() > now.getTime();
-            if (withinGrace && replacementActive) {
-                // Benign race: `rawNext`/the row passed to `store.rotate` above was
-                // never persisted (the CAS rejected it), so mint a genuinely new
-                // sibling token rather than trying to resurrect the discarded one.
-                const sibling = await createRefreshToken(store, result.old.userId, ttlMs, {
-                    familyId: result.old.familyId,
-                    now,
-                });
-                return { outcome: 'rotated', userId: result.old.userId, familyId: sibling.familyId, rawToken: sibling.rawToken, expiresAt: sibling.expiresAt };
-            }
-            await store.revokeFamily(result.old.familyId);
-            return { outcome: 'reuse', userId: result.old.userId, familyId: result.old.familyId };
-        }
+        case 'reuse':
+            return { outcome: 'reuse', userId: result.userId, familyId: result.familyId };
     }
 }
 /** Revoke a session (logout). Finds the token's family and kills the whole family; a no-op if the token is already gone (already rotated/expired/garbage). */
@@ -207,19 +210,49 @@ function createMemoryRefreshTokenStore() {
             const row = byHash(tokenHash);
             return row ? { ...row } : null;
         },
-        async rotate(oldTokenHash, next) {
+        // `async` but contains NO `await` — under Node's run-to-completion
+        // semantics that makes it atomic "for free": nothing can interleave
+        // between the check and the write below. THAT IS NOT PROOF the
+        // algorithm/port contract is sound — it proves only that JavaScript is
+        // single-threaded. A real database can (and on Postgres at READ
+        // COMMITTED, will) interleave two concurrent callers here. Adapter
+        // authors: run `runRefreshTokenStoreConformanceTests` (see
+        // `@andrewpopov/auth-kit/conformance`) against your REAL store, not just
+        // this one, before trusting your `rotate()` implementation.
+        async rotate(oldTokenHash, next, { graceMs, now }) {
             const old = byHash(oldTokenHash);
             if (!old)
                 return { status: 'not-found' };
             if (old.revokedAt !== null) {
                 const replacement = old.replacedById ? sessions.get(old.replacedById) : undefined;
-                return {
-                    status: 'already-revoked',
-                    old: { ...old },
-                    replacement: replacement ? { ...replacement } : null,
-                };
+                const revokedAgeMs = now.getTime() - old.revokedAt.getTime();
+                const withinGrace = graceMs > 0 && revokedAgeMs >= 0 && revokedAgeMs <= graceMs;
+                const replacementActive = replacement !== undefined && replacement.revokedAt === null && replacement.expiresAt.getTime() > now.getTime();
+                if (withinGrace && replacementActive) {
+                    // Benign race: insert a fresh SIBLING in the same family. This
+                    // check and this insert are the same synchronous stretch as the
+                    // `replacementActive` read above — nothing can revoke the family
+                    // in between (that gap, spanning a real await back out to JS, is
+                    // exactly the 0.2.0 TOCTOU; see CHANGELOG "0.2.1 — BREAKING").
+                    const sibling = {
+                        id: next.id,
+                        familyId: old.familyId,
+                        userId: old.userId,
+                        tokenHash: next.tokenHash,
+                        expiresAt: next.expiresAt,
+                        revokedAt: null,
+                        replacedById: null,
+                    };
+                    sessions.set(sibling.id, sibling);
+                    return { status: 'benign-race', session: { ...sibling } };
+                }
+                for (const session of sessions.values()) {
+                    if (session.familyId === old.familyId && session.revokedAt === null)
+                        session.revokedAt = now;
+                }
+                return { status: 'reuse', userId: old.userId, familyId: old.familyId };
             }
-            if (old.expiresAt.getTime() <= Date.now()) {
+            if (old.expiresAt.getTime() <= now.getTime()) {
                 return { status: 'expired', old: { ...old } };
             }
             const session = {
@@ -232,7 +265,7 @@ function createMemoryRefreshTokenStore() {
                 replacedById: null,
             };
             sessions.set(session.id, session);
-            old.revokedAt = new Date();
+            old.revokedAt = now;
             old.replacedById = session.id;
             return { status: 'rotated', session: { ...session } };
         },

@@ -5,19 +5,37 @@ The authentication **primitives** that drifted across the custom-JWT backends
 `express-security-kit`'s scope: password hashing, single-use opaque tokens, and
 refresh-token session rotation with reuse detection.
 
+Password hashing and single-use opaque tokens are pure and stateless.
+Refresh-token session rotation is **not** — it is a stateful protocol run
+against an injected `RefreshTokenStore` port; auth-kit owns the algorithm,
+never the storage engine.
+
 **Deliberately not here:** RBAC models, the JWT signing/verification library,
 cookie handling, and the user model/CRUD — those genuinely differ per app.
-Storage for refresh sessions is **injected** via a port (see below), same idiom
-as the injected `bcrypt`.
 
-Zero runtime dependencies. bcrypt is **injected**, so the native-`bcrypt` apps
-keep their library and levelup keeps `bcryptjs` (their hashes are cross-verifiable).
+Zero runtime dependencies, including the `/conformance` subpath (adapter test
+suite, see below) — bcrypt is **injected**, so the native-`bcrypt` apps keep
+their library and levelup keeps `bcryptjs` (their hashes are
+cross-verifiable), and `/conformance` likewise takes your `describe`/`it`/
+`expect` as parameters instead of importing a test runner itself (`vitest`
+ships ESM-only, with no CJS `require()` entry point at all, so importing it
+internally would break this package for any consumer resolving via CJS).
 
 ## Install
 
 ```
-npm install github:andrewpopov/auth-kit#v0.2.0
+npm install github:andrewpopov/auth-kit#v0.2.1
 ```
+
+> **Upgrading from 0.2.0?** This is a **breaking release** for anyone who
+> implemented the `RefreshTokenStore` port directly (no shipped adapter was
+> merged yet, so this should affect nobody in the fleet today). See
+> [`CHANGELOG.md`](./CHANGELOG.md) for what changed and why, and the
+> "Implementing `RefreshTokenStore`" section below for the new contract. Also:
+> the refresh-rotation **grace window now defaults to `0`** (was 30s) — if you
+> want the old benign-race behavior back, pass
+> `{ graceMs: DEFAULT_ROTATION_GRACE_MS }` explicitly to `rotateRefreshToken`,
+> having read "The grace-window trade" below first.
 
 ## Password hashing
 
@@ -57,13 +75,16 @@ if (!row || row.expiresAt < now || !verifyOpaqueToken(raw, row.tokenHash)) rejec
 ## Refresh-token session rotation (with reuse detection)
 
 Hand-written five times across the fleet, each getting the subtleties
-differently. Composes: cairn's family-kill-on-replay, mizen's `tokensValidFrom`
-epoch for global invalidation, and sano-os's benign-race grace window (two
-browser tabs refreshing near-simultaneously must not nuke the session).
+differently. Composes: cairn's family-kill-on-replay (the **default**, strict
+behavior), mizen's `tokensValidFrom` epoch for global invalidation, and
+sano-os's benign-race grace window as an **opt-in** (see "The grace-window
+trade" below — it is not a pure win, and cairn deliberately refuses it).
 
 Storage is **injected** via `RefreshTokenStore` — implement it against
 Prisma/pg/Drizzle/whatever; auth-kit owns only the rotation algorithm. A
-`createMemoryRefreshTokenStore()` reference implementation ships for tests.
+`createMemoryRefreshTokenStore()` reference implementation ships for tests —
+see "Testing a real adapter" below before trusting a store you write against
+it.
 
 ```ts
 import {
@@ -99,9 +120,87 @@ if (!isEpochValid(claims.epoch, await store.getEpoch(user.id))) throw new Error(
 ```
 
 `rotateRefreshToken`'s third argument accepts `{ graceMs?, now? }` —
-`graceMs` defaults to `DEFAULT_ROTATION_GRACE_MS` (30s, sano-os's value);
-pass `0` to disable the grace window (cairn/mizen's strict behavior — any
-double-submit is treated as reuse).
+`graceMs` **defaults to `0`** (cairn/mizen's strict behavior: any replay of an
+already-rotated token is reuse, full stop). Pass
+`{ graceMs: DEFAULT_ROTATION_GRACE_MS }` (30s, sano-os's value) to opt into
+the benign multi-tab-race window — read the trade below first.
+
+### The grace-window trade (read before you opt in)
+
+A grace window is **not a pure win** — it is a real reuse-detection bypass,
+traded for UX. If you pass `{ graceMs: DEFAULT_ROTATION_GRACE_MS }` (or any
+non-zero value):
+
+> An attacker who replays a stolen refresh token **within `graceMs` of its
+> legitimate rotation** is issued a fresh, valid **sibling** token in the same
+> family, and **nothing is revoked or flagged**. They then keep rotating
+> their own sibling on the live branch forever; reuse never trips again,
+> because the stolen token is never presented again. **The theft is laundered
+> into a legitimate-looking session, and the victim sees nothing.**
+
+sano-os accepts this trade deliberately (two browser tabs refreshing near-
+simultaneously shouldn't both get logged out). **cairn explicitly refuses
+it** — its `auth.service.ts` has a comment reading *"we intentionally do NOT
+add a grace window"* — because a strict family-kill is a strictly stronger
+security posture, and a rolling reopening window on every rotation is a real
+cost. auth-kit is **not** a superset of cairn's behavior when a non-zero
+`graceMs` is configured; it is a deliberately weaker default that a consumer
+must opt into with full knowledge of the trade. The `0` default matches
+cairn's posture out of the box.
+
+## Implementing `RefreshTokenStore`
+
+`rotate()` is the one method that MUST be atomic — and as of 0.2.1 it is the
+**entire** rotation decision, not just the single-use compare-and-swap. Given
+`(oldTokenHash, next, { graceMs, now })`, in ONE transaction / row lock:
+
+1. No row for `oldTokenHash` → `{ status: 'not-found' }`.
+2. Row not revoked, not expired → mark it revoked (`revokedAt = now`,
+   `replacedById = next.id`), insert `next` → `{ status: 'rotated', session }`.
+   Two concurrent callers racing the same `oldTokenHash` must NOT both
+   observe `'rotated'`.
+3. Row not revoked, but past `expiresAt` → `{ status: 'expired', old }`.
+4. Row already revoked: resolve its replacement via `replacedById` (fresh, in
+   THIS transaction), and using `now`/`graceMs`, decide:
+   - within grace AND replacement still active (not revoked, not expired) →
+     insert `next` as a **new sibling** in the same family →
+     `{ status: 'benign-race', session }`.
+   - otherwise → revoke every still-active session in the family (same effect
+     as `revokeFamily`) → `{ status: 'reuse', userId, familyId }`.
+
+The check in step 4 and its action (insert or revoke) **must** happen without
+releasing the lock/leaving the transaction in between — see the full JSDoc on
+`RefreshTokenStore.rotate` in `src/index.ts` for the reasoning (this is the
+fix for the 0.2.0 TOCTOU, see CHANGELOG).
+
+## Testing a real adapter
+
+**Passing the in-memory store's tests proves nothing about a real adapter's
+atomicity.** `createMemoryRefreshTokenStore().rotate` is atomic "for free"
+because JavaScript is single-threaded and its `rotate()` has no internal
+`await` — it would pass identically against a store with no locking at all. A
+real database can, and on Postgres at READ COMMITTED will, let two concurrent
+`rotate()` calls on the same token both "win" (a classic lost update) unless
+the transaction uses `SELECT ... FOR UPDATE` or an equivalent atomic
+compare-and-swap.
+
+Run the shipped conformance suite against your REAL store before trusting it,
+from inside your own vitest (or Jest) test file — pass your own
+`describe`/`it`/`expect` in, the suite doesn't import a test runner itself:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { runRefreshTokenStoreConformanceTests } from '@andrewpopov/auth-kit/conformance';
+import { createMyPostgresStore } from '../src/postgres-store';
+
+runRefreshTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { describe, it, expect });
+```
+
+It asserts (against N genuinely concurrent calls, not just sequential ones):
+single-use under concurrency, family-kill on reuse, the grace-window/benign-
+race behavior (including the `graceMs: 0` default), expiry/revocation
+rejection, and the Defect-A regression (no live token ever survives in a
+revoked family).
 
 ## API
 
@@ -118,8 +217,9 @@ double-submit is treated as reuse).
 | `rotateRefreshToken(store, rawToken, ttlMs, opts?)` | Single-use atomic rotation + reuse detection. `→ { outcome: 'rotated'\|'reuse'\|'invalid', ... }`. |
 | `revokeRefreshToken(store, rawToken)` | Logout: revoke the token's whole family. |
 | `isEpochValid(tokenEpochMs, currentEpoch)` | Check an access token's `epoch` claim against the user's current epoch. |
-| `DEFAULT_ROTATION_GRACE_MS` | `30_000`. |
+| `DEFAULT_ROTATION_GRACE_MS` | `30_000` — suggested opt-in value; NOT the default (`graceMs` defaults to `0`). |
 | `createMemoryRefreshTokenStore()` | In-memory `RefreshTokenStore` — test double, not for production. |
+| `runRefreshTokenStoreConformanceTests(makeStore, { describe, it, expect }, opts?)` | From `@andrewpopov/auth-kit/conformance`. Adapter conformance suite — run against a REAL store before trusting it. Test-runner primitives are injected, not imported. |
 
 ## Standards
 

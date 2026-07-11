@@ -116,7 +116,11 @@ describe('property 1 — rotation is atomic / single-use', () => {
     const oldHash = hashOpaqueToken(issued.rawToken);
 
     const attempts = Array.from({ length: 5 }, () =>
-      store.rotate(oldHash, { id: crypto.randomUUID(), tokenHash: hashOpaqueToken(crypto.randomUUID()), expiresAt: new Date(Date.now() + TTL_MS) }),
+      store.rotate(
+        oldHash,
+        { id: crypto.randomUUID(), tokenHash: hashOpaqueToken(crypto.randomUUID()), expiresAt: new Date(Date.now() + TTL_MS) },
+        { graceMs: 0, now: new Date() },
+      ),
     );
     const results = await Promise.all(attempts);
     const rotatedCount = results.filter((r) => r.status === 'rotated').length;
@@ -181,6 +185,74 @@ describe('property 3 — the benign race is NOT treated as an attack', () => {
     const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: 0 });
     expect(replay.outcome).toBe('reuse');
   });
+});
+
+describe('Defect B — graceMs defaults to 0 (strict, opt-in-only grace window)', () => {
+  it('a replay of an already-rotated token WITHOUT an explicit graceMs is reuse, not a benign race, even though a replacement is active', async () => {
+    const store = createMemoryRefreshTokenStore();
+    const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS); // no options at all
+    expect(winner.outcome).toBe('rotated');
+
+    // Replayed an instant later — under the OLD default (30s) this would have
+    // been a benign race. Under the new default (0) it must be reuse.
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
+    expect(replay.outcome).toBe('reuse');
+  });
+
+  it('DEFAULT_ROTATION_GRACE_MS is still exported as the suggested opt-in value, but is not applied unless passed explicitly', async () => {
+    expect(DEFAULT_ROTATION_GRACE_MS).toBe(30_000);
+
+    const store = createMemoryRefreshTokenStore();
+    const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
+    expect(winner.outcome).toBe('rotated');
+
+    // Opting in explicitly restores the benign-race behavior.
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: DEFAULT_ROTATION_GRACE_MS });
+    expect(replay.outcome).toBe('rotated');
+  });
+});
+
+describe('Defect A regression — the benign-race branch must never resurrect a revoked family (TOCTOU)', () => {
+  it(
+    'a family revoked concurrently with a benign-race replay must never leave a live token in that family, regardless of ' +
+      'which of the two "wins" — CANARY: this assertion fails against the old (v0.2.0) two-call decide-in-JS-then-act-' +
+      'as-a-second-call design, where the sibling insert is unconditional and blind to the concurrent revoke. See the ' +
+      'PR description for the manual before/after run.',
+    async () => {
+      const store = createMemoryRefreshTokenStore();
+      const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+      const rotated = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
+      expect(rotated.outcome).toBe('rotated');
+      if (rotated.outcome !== 'rotated') throw new Error('unreachable');
+      const familyId = rotated.familyId;
+
+      // Attacker replays the stolen original token within the grace window
+      // (opted in here to exercise the benign-race path at all), racing
+      // against a concurrent revoke of the whole family — a victim logout,
+      // an admin action, or a password reset firing at the same moment.
+      const [replay] = await Promise.all([
+        rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: DEFAULT_ROTATION_GRACE_MS }),
+        store.revokeFamily(familyId),
+      ]);
+
+      // Whichever happened "first", the invariant must hold afterward: no
+      // live (non-revoked) token exists in a family that was revoked.
+      if (replay.outcome === 'rotated') {
+        const row = await store.findByHash(hashOpaqueToken(replay.rawToken));
+        expect(row).not.toBeNull();
+        expect(row!.revokedAt).not.toBeNull();
+      } else {
+        expect(replay.outcome).toBe('reuse');
+      }
+
+      // The original successor token must also be dead — the family is fully gone.
+      const successorStillAlive = await store.findByHash(hashOpaqueToken(rotated.rawToken));
+      expect(successorStillAlive?.revokedAt).not.toBeNull();
+    },
+  );
 });
 
 describe('revokeRefreshToken (logout)', () => {

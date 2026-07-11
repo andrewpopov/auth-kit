@@ -1,9 +1,12 @@
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
- * outside express-security-kit's scope. Pure and stateless: password hashing and
- * single-use opaque tokens. The RBAC models, refresh-token stores, and 2FA flows
- * genuinely differ per app and are deliberately NOT here.
+ * outside express-security-kit's scope. Password hashing and single-use opaque
+ * tokens are pure and stateless. Refresh-token session rotation (below) is NOT
+ * stateless — it is a stateful protocol run against an injected
+ * `RefreshTokenStore` port; auth-kit owns the algorithm, never the storage
+ * engine. The RBAC models, JWT library, and 2FA flows genuinely differ per app
+ * and are deliberately NOT here.
  *
  * bcrypt is INJECTED (not bundled): the native-`bcrypt` apps keep their library,
  * levelup keeps `bcryptjs`, and the package forces no implementation on anyone.
@@ -75,10 +78,27 @@ export type NewSessionFields = Pick<RefreshSessionRecord, 'id' | 'tokenHash' | '
 export type RotateStoreResult = {
     status: 'rotated';
     session: RefreshSessionRecord;
-} | {
-    status: 'already-revoked';
-    old: RefreshSessionRecord;
-    replacement: RefreshSessionRecord | null;
+}
+/**
+ * Benign multi-tab race: `oldTokenHash` was already revoked, but within
+ * `graceMs` AND its replacement was (at the moment of THIS atomic call,
+ * re-checked fresh — never from a stale read) still active. The store
+ * inserted `next` as a new sibling session in the same family and returns
+ * it here.
+ */
+ | {
+    status: 'benign-race';
+    session: RefreshSessionRecord;
+}
+/**
+ * Genuine reuse (stolen/replayed token, or a token revoked by logout/
+ * password-reset/admin action): the store revoked every still-active
+ * session in the family, atomically with the check, before returning.
+ */
+ | {
+    status: 'reuse';
+    userId: string;
+    familyId: string;
 } | {
     status: 'expired';
     old: RefreshSessionRecord;
@@ -88,31 +108,52 @@ export type RotateStoreResult = {
 /**
  * The storage port. Implement this against Prisma/pg/Drizzle/whatever; auth-kit
  * owns the rotation algorithm above it. `rotate` is the one method that MUST be
- * atomic (a DB transaction / row lock) — it is both the single-use compare-
- * and-swap (exactly one concurrent rotation of the same token may win) and the
- * read that supplies the facts (`old`, `replacement`) the algorithm needs to
- * tell a benign multi-tab race from real reuse.
+ * atomic (a DB transaction / row lock) — see its doc below.
  */
 export interface RefreshTokenStore {
-    /** Insert a brand-new session row (fresh login, or a benign-race sibling). */
+    /** Insert a brand-new session row (fresh login). */
     createSession(session: RefreshSessionRecord): Promise<void>;
     /** Look up a row by token hash (used by e.g. logout to find its family). */
     findByHash(tokenHash: string): Promise<RefreshSessionRecord | null>;
     /**
-     * Atomic compare-and-swap + insert, in one transaction:
-     *  - no row for `oldTokenHash` -> `not-found`.
-     *  - row already revoked -> `already-revoked`, returning the row AND its
-     *    replacement (resolved via `replacedById`, if any) so the algorithm can
-     *    judge the grace window.
-     *  - row not revoked but past `expiresAt` -> `expired`.
-     *  - otherwise: mark the row revoked (`revokedAt = now`, `replacedById =
-     *    next.id`) and insert `next` (`userId`/`familyId` copied from the row)
-     *    -> `rotated`. Two concurrent callers racing the same `oldTokenHash`
-     *    MUST NOT both observe `rotated` — the transaction/row-lock is what
-     *    guarantees single-use.
+     * Atomic decide-AND-act, in ONE transaction / row-lock — this is the entire
+     * rotation state machine, including the benign-race-vs-reuse judgment call
+     * and its consequence (insert or family-revoke). Nothing about the decision
+     * may be read outside this call and acted on later: a second, separate
+     * store call driven by a snapshot from a PRIOR `rotate()` result is exactly
+     * the TOCTOU auth-kit v0.2.0 shipped (see CHANGELOG "0.2.1 — BREAKING").
+     *
+     * Steps, all inside the one transaction:
+     *  1. No row for `oldTokenHash` -> `not-found`.
+     *  2. Row not revoked, not expired -> mark it revoked (`revokedAt = now`,
+     *     `replacedById = next.id`), insert `next` (`userId`/`familyId` copied
+     *     from the row) -> `rotated`. Two concurrent callers racing the same
+     *     `oldTokenHash` MUST NOT both observe `rotated` — this is the
+     *     single-use compare-and-swap; it is what a lock/`SELECT ... FOR
+     *     UPDATE`/conditional `UPDATE ... WHERE revoked_at IS NULL` buys you.
+     *  3. Row not revoked, but past `expiresAt` -> `expired`.
+     *  4. Row already revoked: resolve its replacement via `replacedById`
+     *     (fresh, in THIS transaction — not a value carried in from outside),
+     *     and compute, using `options.now`:
+     *       - `revokedAgeMs = now - row.revokedAt`
+     *       - `withinGrace = options.graceMs > 0 && revokedAgeMs in [0, graceMs]`
+     *       - `replacementActive = replacement exists, not revoked, not expired`
+     *     - `withinGrace && replacementActive` -> insert `next` as a NEW
+     *       sibling row in the same family (`revokedAt: null`,
+     *       `replacedById: null`) -> `benign-race`, returning the inserted row.
+     *     - otherwise -> revoke every still-active row sharing the family
+     *       (same effect as {@link RefreshTokenStore.revokeFamily}) -> `reuse`.
+     *  The check in step 4 and its action (insert or revoke) MUST happen
+     *  without releasing the lock/leaving the transaction in between — that is
+     *  the fix for the TOCTOU: a concurrent family-kill landing after this
+     *  call's read but before its write is impossible by construction, because
+     *  there IS no gap between them for a caller to observe or interleave into.
      */
-    rotate(oldTokenHash: string, next: NewSessionFields): Promise<RotateStoreResult>;
-    /** Revoke every still-active row sharing a family (reuse detected, or logout of one session). */
+    rotate(oldTokenHash: string, next: NewSessionFields, options: {
+        graceMs: number;
+        now: Date;
+    }): Promise<RotateStoreResult>;
+    /** Revoke every still-active row sharing a family (logout of one session). Idempotent — safe to call on an already-dead family. */
     revokeFamily(familyId: string): Promise<void>;
     /** Revoke every still-active row for a user, across all families (logout-everywhere). */
     revokeAllForUser(userId: string): Promise<void>;
@@ -126,7 +167,16 @@ export interface RefreshTokenStore {
      */
     bumpEpoch(userId: string): Promise<Date>;
 }
-/** Two presentations of the same token within this many ms of its rotation are treated as a benign multi-tab race, not theft. sano-os's value. */
+/**
+ * Two presentations of the same token within this many ms of its rotation MAY
+ * be treated as a benign multi-tab race instead of theft (sano-os's value) —
+ * but only if a consumer opts in via `{ graceMs: DEFAULT_ROTATION_GRACE_MS }`.
+ * NOT the default (see {@link rotateRefreshToken}): a grace window is an
+ * explicit reuse-detection bypass traded for UX, and a stolen token replayed
+ * inside it is laundered into a legitimate-looking sibling session with
+ * nothing revoked or flagged. cairn deliberately refuses this trade. A
+ * security default must be the strict one.
+ */
 export declare const DEFAULT_ROTATION_GRACE_MS = 30000;
 export interface CreateRefreshTokenResult {
     rawToken: string;
@@ -156,16 +206,27 @@ export type RotateRefreshTokenResult = {
  *
  * - Unknown or expired token -> `invalid` (can't be attributed to a family;
  *   nothing to revoke — mirrors cairn's reasoning).
- * - Already-revoked token presented again:
+ * - Already-revoked token presented again — the store's `rotate()` makes this
+ *   call ATOMICALLY (see {@link RefreshTokenStore.rotate}; this used to be a
+ *   decide-in-JS-then-act-as-a-second-call sequence and that was a TOCTOU —
+ *   fixed in 0.2.1, see CHANGELOG):
  *   - within `graceMs` of its rotation AND its replacement is still active ->
- *     a benign concurrent refresh (two tabs) — mints a fresh SIBLING token in
- *     the SAME family and does NOT revoke anything. This is sano-os's grace
- *     window; it is the property that will bite real users if it regresses.
+ *     a benign concurrent refresh (two tabs) — a fresh SIBLING token in the
+ *     SAME family was minted and nothing else was revoked. This is sano-os's
+ *     grace window, OPT-IN only (see `graceMs` below).
  *   - otherwise -> genuine reuse (a stolen/replayed token, or a token
- *     revoked by logout) — the WHOLE family is revoked and `reuse` is
+ *     revoked by logout) — the WHOLE family was revoked and `reuse` is
  *     returned.
  * - Otherwise -> the CAS wins: the old token is marked revoked+replaced, a
  *   new token is issued in the same family -> `rotated`.
+ *
+ * `graceMs` defaults to `0` (strict — cairn/mizen's behavior: any replay of
+ * an already-rotated token is reuse, full stop). Passing
+ * `DEFAULT_ROTATION_GRACE_MS` opts into sano-os's 30s benign-race window,
+ * which is a real, honest security/UX trade: a stolen token replayed inside
+ * that window is issued a fresh, valid sibling and nothing is flagged — the
+ * theft is laundered into a legitimate-looking session. Opt in only with eyes
+ * open (see README).
  */
 export declare function rotateRefreshToken(store: RefreshTokenStore, rawToken: string, ttlMs: number, options?: {
     graceMs?: number;
