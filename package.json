@@ -1,7 +1,7 @@
 {
   "name": "@andrewpopov/auth-kit",
-  "version": "0.1.0",
-  "description": "Authentication primitives: bcrypt password hashing (injected impl, cost 12, optional SHA-256 pre-hash + timing-safe dummy hash) and single-use SHA-256 opaque tokens (reset/invite/email-change). Pure and stateless — RBAC and refresh-token stores stay app-specific.",
+  "version": "0.2.0",
+  "description": "Authentication primitives: bcrypt password hashing (injected impl, cost 12, optional SHA-256 pre-hash + timing-safe dummy hash), single-use SHA-256 opaque tokens (reset/invite/email-change), and refresh-token session rotation with reuse detection (injected storage port, family-kill-on-replay, epoch-based global invalidation, benign-race grace window). Pure and stateless — storage, RBAC, and the JWT library stay app-specific.",
   "author": "Andrew Popov",
   "license": "MIT",
   "main": "dist/index.js",

@@ -56,3 +56,139 @@ export interface PasswordHasher {
 }
 /** Create a password hasher bound to a bcrypt implementation and policy. */
 export declare function createPasswordHasher(options: PasswordHasherOptions): PasswordHasher;
+/** One refresh-token row. Storage-agnostic; a store implementation maps this to its own schema. */
+export interface RefreshSessionRecord {
+    id: string;
+    /** Groups every token issued/rotated within one login session (a "family"). */
+    familyId: string;
+    userId: string;
+    /** SHA-256 hash of the opaque token (see {@link hashOpaqueToken}) — never the raw token. */
+    tokenHash: string;
+    expiresAt: Date;
+    /** Set on rotation, reuse-kill, or logout. `null` means still active. */
+    revokedAt: Date | null;
+    /** Set ONLY when revocation was caused by rotation — points at the successor row. */
+    replacedById: string | null;
+}
+/** Fields the caller supplies for the row `rotate` inserts on success; `userId`/`familyId` are copied from the row being rotated. */
+export type NewSessionFields = Pick<RefreshSessionRecord, 'id' | 'tokenHash' | 'expiresAt'>;
+export type RotateStoreResult = {
+    status: 'rotated';
+    session: RefreshSessionRecord;
+} | {
+    status: 'already-revoked';
+    old: RefreshSessionRecord;
+    replacement: RefreshSessionRecord | null;
+} | {
+    status: 'expired';
+    old: RefreshSessionRecord;
+} | {
+    status: 'not-found';
+};
+/**
+ * The storage port. Implement this against Prisma/pg/Drizzle/whatever; auth-kit
+ * owns the rotation algorithm above it. `rotate` is the one method that MUST be
+ * atomic (a DB transaction / row lock) — it is both the single-use compare-
+ * and-swap (exactly one concurrent rotation of the same token may win) and the
+ * read that supplies the facts (`old`, `replacement`) the algorithm needs to
+ * tell a benign multi-tab race from real reuse.
+ */
+export interface RefreshTokenStore {
+    /** Insert a brand-new session row (fresh login, or a benign-race sibling). */
+    createSession(session: RefreshSessionRecord): Promise<void>;
+    /** Look up a row by token hash (used by e.g. logout to find its family). */
+    findByHash(tokenHash: string): Promise<RefreshSessionRecord | null>;
+    /**
+     * Atomic compare-and-swap + insert, in one transaction:
+     *  - no row for `oldTokenHash` -> `not-found`.
+     *  - row already revoked -> `already-revoked`, returning the row AND its
+     *    replacement (resolved via `replacedById`, if any) so the algorithm can
+     *    judge the grace window.
+     *  - row not revoked but past `expiresAt` -> `expired`.
+     *  - otherwise: mark the row revoked (`revokedAt = now`, `replacedById =
+     *    next.id`) and insert `next` (`userId`/`familyId` copied from the row)
+     *    -> `rotated`. Two concurrent callers racing the same `oldTokenHash`
+     *    MUST NOT both observe `rotated` — the transaction/row-lock is what
+     *    guarantees single-use.
+     */
+    rotate(oldTokenHash: string, next: NewSessionFields): Promise<RotateStoreResult>;
+    /** Revoke every still-active row sharing a family (reuse detected, or logout of one session). */
+    revokeFamily(familyId: string): Promise<void>;
+    /** Revoke every still-active row for a user, across all families (logout-everywhere). */
+    revokeAllForUser(userId: string): Promise<void>;
+    /** The user's current auth epoch (`tokensValidFrom`), or `null` if the user is unknown to the store. */
+    getEpoch(userId: string): Promise<Date | null>;
+    /**
+     * Bump the epoch STRICTLY forward (password reset / deactivate), invalidating
+     * every access token whose `epoch` claim predates it. Must be monotonic even
+     * for two bumps in the same millisecond: `max(now, storedEpoch) + 1ms`
+     * (sano-os's formula).
+     */
+    bumpEpoch(userId: string): Promise<Date>;
+}
+/** Two presentations of the same token within this many ms of its rotation are treated as a benign multi-tab race, not theft. sano-os's value. */
+export declare const DEFAULT_ROTATION_GRACE_MS = 30000;
+export interface CreateRefreshTokenResult {
+    rawToken: string;
+    familyId: string;
+    expiresAt: Date;
+}
+/** Issue a fresh refresh token, starting a new family (login/register/reauthentication). */
+export declare function createRefreshToken(store: RefreshTokenStore, userId: string, ttlMs: number, options?: {
+    familyId?: string;
+    now?: Date;
+}): Promise<CreateRefreshTokenResult>;
+export type RotateRefreshTokenResult = {
+    outcome: 'rotated';
+    userId: string;
+    familyId: string;
+    rawToken: string;
+    expiresAt: Date;
+} | {
+    outcome: 'reuse';
+    userId: string;
+    familyId: string;
+} | {
+    outcome: 'invalid';
+};
+/**
+ * Rotate a refresh token: single-use, atomic, with reuse detection.
+ *
+ * - Unknown or expired token -> `invalid` (can't be attributed to a family;
+ *   nothing to revoke — mirrors cairn's reasoning).
+ * - Already-revoked token presented again:
+ *   - within `graceMs` of its rotation AND its replacement is still active ->
+ *     a benign concurrent refresh (two tabs) — mints a fresh SIBLING token in
+ *     the SAME family and does NOT revoke anything. This is sano-os's grace
+ *     window; it is the property that will bite real users if it regresses.
+ *   - otherwise -> genuine reuse (a stolen/replayed token, or a token
+ *     revoked by logout) — the WHOLE family is revoked and `reuse` is
+ *     returned.
+ * - Otherwise -> the CAS wins: the old token is marked revoked+replaced, a
+ *   new token is issued in the same family -> `rotated`.
+ */
+export declare function rotateRefreshToken(store: RefreshTokenStore, rawToken: string, ttlMs: number, options?: {
+    graceMs?: number;
+    now?: Date;
+}): Promise<RotateRefreshTokenResult>;
+/** Revoke a session (logout). Finds the token's family and kills the whole family; a no-op if the token is already gone (already rotated/expired/garbage). */
+export declare function revokeRefreshToken(store: RefreshTokenStore, rawToken: string): Promise<void>;
+/**
+ * Check an access token's `epoch` claim (set at mint time to `store.getEpoch`)
+ * against the user's CURRENT epoch. A bump (password reset, deactivate, "log
+ * out everywhere") invalidates every token minted before it — mizen's
+ * `tokensValidFrom` pattern. Fails closed: an unknown user (`currentEpoch ===
+ * null`) is never valid.
+ */
+export declare function isEpochValid(tokenEpochMs: number, currentEpoch: Date | null): boolean;
+/**
+ * In-memory reference implementation of {@link RefreshTokenStore} — a TEST
+ * DOUBLE, not for production. Ships so consumers (and this package's own
+ * tests) can exercise rotation/reuse-detection without a real database.
+ * Mirrors mizen's `MemoryAuthStore` test pattern.
+ *
+ * Has no concept of "unknown user" (it doesn't model a users table), so
+ * `getEpoch` defaults an untracked user to the Unix epoch (never invalidates
+ * anything) rather than `null` — call `bumpEpoch` to exercise invalidation.
+ */
+export declare function createMemoryRefreshTokenStore(): RefreshTokenStore;
