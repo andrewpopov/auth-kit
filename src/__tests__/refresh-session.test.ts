@@ -140,6 +140,7 @@ describe('property 2 — replay of an already-rotated token kills the whole fami
     // Replay the ORIGINAL (now-rotated) token well outside any grace window.
     const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: 0 });
     expect(replay.outcome).toBe('reuse');
+    if (replay.outcome !== 'reuse') throw new Error('unreachable');
     expect(replay.familyId).toBe(issued.familyId);
 
     // The whole family is dead — the legitimate successor token no longer works either.
