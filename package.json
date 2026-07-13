@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/auth-kit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Authentication primitives: password hashing, opaque tokens, refresh-session rotation, and provider-neutral OIDC external-identity binding. OAuth proof, account linking, placeholder claims, and provisioning are run through injected storage/policy ports; user CRUD, RBAC, sessions, and framework adapters stay app-specific. Ships real-adapter conformance suites.",
   "author": "Andrew Popov",
   "license": "MIT",
@@ -28,7 +28,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:pack": "node scripts/verify-pack.mjs"
+    "verify:pack": "node scripts/verify-pack.mjs",
+    "verify": "npm run typecheck && npm test && npm run build && npm run verify:pack"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

@@ -11,6 +11,7 @@ exports.createGoogleAuthorizationUrl = createGoogleAuthorizationUrl;
 exports.externalIdentityFromVerifiedGoogleClaims = externalIdentityFromVerifiedGoogleClaims;
 exports.exchangeGoogleAuthorizationCode = exchangeGoogleAuthorizationCode;
 const crypto_1 = __importDefault(require("crypto"));
+const policy_1 = require("./policy");
 const GOOGLE_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
 function base64Url(value) {
     return Buffer.from(value).toString('base64url');
@@ -34,11 +35,13 @@ function safeEqual(left, right) {
 /** Create a signed, short-lived OAuth intent. Put the exact returned value in an HttpOnly callback-scoped cookie. */
 function createOAuthState(options) {
     const now = options.now ?? new Date();
+    const ttlMs = options.ttlMs ?? 10 * 60 * 1000;
+    (0, policy_1.requirePositiveTtl)(ttlMs);
     const payload = {
         kind: 'auth-kit-oauth-state',
         nonce: crypto_1.default.randomUUID(),
         issuedAt: now.getTime(),
-        expiresAt: now.getTime() + (options.ttlMs ?? 10 * 60 * 1000),
+        expiresAt: now.getTime() + ttlMs,
         ...options.intent,
     };
     const encoded = base64Url(JSON.stringify(payload));

@@ -20,6 +20,10 @@ describe('OIDC proof primitives', () => {
     expect(verifyOAuthState(`${state}x`, secret, now)).toBeNull();
   });
 
+  it.each([0, -1, 1.5])('rejects invalid OAuth state TTLs: %s', (ttlMs) => {
+    expect(() => createOAuthState({ secret, intent: { purpose: 'login' }, ttlMs })).toThrow(/ttlMs/);
+  });
+
   it('canaries same-browser binding: a valid signed state without its cookie is rejected', () => {
     const state = createOAuthState({ secret, intent: { purpose: 'login' } });
     expect(requireSameBrowserOAuthState(state, undefined, secret)).toBeNull();

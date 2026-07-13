@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import type { ExternalIdentity } from './identity';
+import { requirePositiveTtl } from './policy';
 
 const GOOGLE_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
 
@@ -42,11 +43,13 @@ function safeEqual(left: string, right: string): boolean {
 /** Create a signed, short-lived OAuth intent. Put the exact returned value in an HttpOnly callback-scoped cookie. */
 export function createOAuthState(options: CreateOAuthStateOptions): string {
   const now = options.now ?? new Date();
+  const ttlMs = options.ttlMs ?? 10 * 60 * 1000;
+  requirePositiveTtl(ttlMs);
   const payload: OAuthStatePayload = {
     kind: 'auth-kit-oauth-state',
     nonce: crypto.randomUUID(),
     issuedAt: now.getTime(),
-    expiresAt: now.getTime() + (options.ttlMs ?? 10 * 60 * 1000),
+    expiresAt: now.getTime() + ttlMs,
     ...options.intent,
   };
   const encoded = base64Url(JSON.stringify(payload));

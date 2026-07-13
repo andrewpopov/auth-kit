@@ -122,8 +122,8 @@ export function runRefreshTokenStoreConformanceTests(
 
     it('rotate(): an expired, never-rotated token -> expired (mapped to `invalid`), not reuse', async () => {
       const store = await makeStore();
-      const issued = await createRefreshToken(store, 'user-1', -1);
-      const result = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
+      const issued = await createRefreshToken(store, 'user-1', 1, { now: new Date(1_000) });
+      const result = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: new Date(1_002) });
       expect(result.outcome).toBe('invalid');
     });
 
