@@ -1,8 +1,10 @@
-import { type RefreshTokenStore } from './index';
+import { type AccountIdentityRecord, type ExternalIdentityStore, type RefreshTokenStore } from './index';
 /** The subset of `expect(...)`'s chainable API this suite uses — structurally satisfied by vitest's and Jest's `expect` (both are duck-typed, not imported). */
 export interface ExpectLike {
     (actual: unknown): {
         toBe(expected: unknown): void;
+        toEqual(expected: unknown): void;
+        toMatchObject(expected: object): void;
         toBeNull(): void;
         toContain(expected: unknown): void;
         toBeGreaterThan(expected: number): void;
@@ -15,6 +17,10 @@ export interface ExpectLike {
             toBeUndefined(): Promise<void>;
         };
     };
+}
+export interface IdentityStoreConformancePreparation {
+    /** Insert test accounts into the real adapter without binding an external identity. */
+    createAccount(account: AccountIdentityRecord): Promise<void>;
 }
 /**
  * The test-runner primitives the suite is run against — INJECTED, same idiom
@@ -59,5 +65,19 @@ export interface ConformanceTestHarness {
  * ```
  */
 export declare function runRefreshTokenStoreConformanceTests(makeStore: () => RefreshTokenStore | Promise<RefreshTokenStore>, harness: ConformanceTestHarness, options?: {
+    concurrency?: number;
+}): void;
+/**
+ * ExternalIdentityStore PORT CONFORMANCE SUITE. Unlike refresh sessions, this
+ * protocol spans two unique namespaces: local account ids and (issuer,
+ * subject). `bindExternalIdentity` and `claimPlaceholder` must decide and act
+ * atomically — a select followed by an unconditional update permits two
+ * accounts to win the same Google subject under real database concurrency.
+ *
+ * Consumers provide a test-only preparation adapter because account schemas
+ * differ. It must insert exactly the supplied account attributes into the real
+ * database; no fake in-memory store proves database uniqueness or CAS safety.
+ */
+export declare function runExternalIdentityStoreConformanceTests(makeStore: () => ExternalIdentityStore | Promise<ExternalIdentityStore>, prepare: (store: ExternalIdentityStore) => IdentityStoreConformancePreparation | Promise<IdentityStoreConformancePreparation>, harness: ConformanceTestHarness, options?: {
     concurrency?: number;
 }): void;
