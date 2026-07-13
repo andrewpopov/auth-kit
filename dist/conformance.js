@@ -64,8 +64,8 @@ function runRefreshTokenStoreConformanceTests(makeStore, harness, options) {
         });
         it('rotate(): an expired, never-rotated token -> expired (mapped to `invalid`), not reuse', async () => {
             const store = await makeStore();
-            const issued = await (0, index_1.createRefreshToken)(store, 'user-1', -1);
-            const result = await (0, index_1.rotateRefreshToken)(store, issued.rawToken, TTL_MS);
+            const issued = await (0, index_1.createRefreshToken)(store, 'user-1', 1, { now: new Date(1000) });
+            const result = await (0, index_1.rotateRefreshToken)(store, issued.rawToken, TTL_MS, { now: new Date(1002) });
             expect(result.outcome).toBe('invalid');
         });
         it('rotate(): single-use under GENUINE concurrency — N parallel rotate() calls on the same token, exactly one succeeds ' +
