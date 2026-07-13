@@ -2,6 +2,7 @@
 
 ## 0.3.1
 
+- Add public contribution, support, and private vulnerability-reporting policies.
 - Reject invalid bcrypt rounds, refresh-token TTLs, OAuth state TTLs, and
   rotation grace windows with `AuthPolicyError` rather than creating expired or
   otherwise nonsensical credentials.
