@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+Adds provider-neutral OAuth/OIDC external identity binding.
+
+- **Proof layer:** signed short-lived state, same-browser correlation helper,
+  PKCE S256, Google authorization URL construction, authorization-code
+  exchange, and an injected cryptographic ID-token verifier. The package
+  requires Google's issuer, audience, stable subject, and verified-claim shape
+  before producing an `ExternalIdentity`.
+- **Binding layer:** returning login by `(issuer, subject)`, authenticated
+  explicit linking, narrow app-policy-approved placeholder claims, deliberate
+  provisioning, typed conflicts/refusals, and an injected audit sink.
+- **No email adoption:** an unauthenticated OAuth callback cannot auto-link a
+  credentialed or independently verified local account by email. This closes
+  the pre-hijacking/account-takeover class that diverged across consumers.
+- **Conformance:** `runExternalIdentityStoreConformanceTests` exercises real
+  adapter behavior for subject uniqueness, no credentialed-email adoption,
+  placeholder claiming, and concurrent linking.
+
+This is additive at the export level but deliberately requires an adapter and
+policy migration before a consumer replaces its existing OAuth flow.
+
 ## 0.2.2
 
 Fix — expose `./package.json` in the `exports` map. Without it,

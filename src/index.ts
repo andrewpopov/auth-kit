@@ -1,5 +1,8 @@
 import crypto from 'crypto';
 
+export * from './identity';
+export * from './oidc';
+
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),

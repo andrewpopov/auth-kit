@@ -1,9 +1,10 @@
 # @andrewpopov/auth-kit
 
-The authentication **primitives** that drifted across the custom-JWT backends
-(bewks, cairn, savoro, towerpower, levelup, sano-os), outside
-`express-security-kit`'s scope: password hashing, single-use opaque tokens, and
-refresh-token session rotation with reuse detection.
+The authentication **primitives and protocols** that drifted across the
+custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
+outside `express-security-kit`'s scope: password hashing, single-use opaque
+tokens, refresh-token session rotation, and provider-neutral OAuth identity
+binding.
 
 Password hashing and single-use opaque tokens are pure and stateless.
 Refresh-token session rotation is **not** — it is a stateful protocol run
@@ -12,6 +13,9 @@ never the storage engine.
 
 **Deliberately not here:** RBAC models, the JWT signing/verification library,
 cookie handling, and the user model/CRUD — those genuinely differ per app.
+OAuth proof and account binding are shared because they must obey identical
+security invariants, but each app still supplies its own account policy and
+database adapter.
 
 Zero runtime dependencies, including the `/conformance` subpath (adapter test
 suite, see below) — bcrypt is **injected**, so the native-`bcrypt` apps keep
@@ -71,6 +75,91 @@ if (!row || row.expiresAt < now || !verifyOpaqueToken(raw, row.tokenHash)) rejec
 ```
 
 `generateResetToken` / `hashResetToken` are aliases for the historical names.
+
+## OAuth and external identity binding
+
+OAuth and user management are separate layers:
+
+1. `auth-kit` OAuth helpers prove an external identity and return
+   `{ issuer, subject, verified claims }`.
+2. The identity engine decides whether the identity is returning, explicitly
+   links to the current local account, safely claims an unverified placeholder,
+   provisions a new account, conflicts, or is refused.
+3. The app continues to own user rows, roles, memberships, invitations,
+   deactivation, session cookies/JWTs, and UI.
+
+**Email is a verified claim, never the durable identity key.** Returning users
+are resolved by `(issuer, subject)`. An unauthenticated OAuth callback never
+adopts a credentialed or independently verified local account just because its
+email matches. Existing users link Google only while authenticated in the app,
+through a same-browser OAuth ceremony.
+
+### OAuth proof
+
+```ts
+import {
+  createOAuthState,
+  createPkcePair,
+  createGoogleAuthorizationUrl,
+  requireSameBrowserOAuthState,
+  exchangeGoogleAuthorizationCode,
+} from '@andrewpopov/auth-kit';
+
+const state = createOAuthState({ secret: process.env.OAUTH_STATE_SECRET!, intent: { purpose: 'link', accountId } });
+// Store this exact state in an HttpOnly, SameSite=Lax, callback-scoped cookie.
+const pkce = createPkcePair();
+const url = createGoogleAuthorizationUrl({ clientId, redirectUri, state, pkce });
+
+// In the callback: reject unless query state exactly matches the initiating
+// browser's cookie, then clear the cookie before exchanging the code.
+const intent = requireSameBrowserOAuthState(query.state, requestCookie, process.env.OAUTH_STATE_SECRET!);
+if (!intent) throw new Error('OAuth request is invalid or expired');
+
+const identity = await exchangeGoogleAuthorizationCode({
+  code: query.code,
+  clientId,
+  clientSecret,
+  redirectUri,
+  codeVerifier: pkceVerifier,
+  verifier: {
+    // Use google-auth-library, jose, Passport, or a framework-provided
+    // verifier. It MUST cryptographically verify the ID token signature.
+    verify: async (idToken, audience) => verifiedGoogleClaims(idToken, audience),
+  },
+});
+```
+
+`exchangeGoogleAuthorizationCode` does not query an app database. Its injected
+verifier must cryptographically validate the ID token; auth-kit then requires
+Google's issuer, audience, non-empty stable subject, and normalized claims.
+
+### Account binding
+
+```ts
+import { resolveExternalIdentity, linkExternalIdentity } from '@andrewpopov/auth-kit';
+
+// Unauthenticated login callback: returning subject, safe placeholder claim,
+// deliberate provisioning, or a typed refusal. Never email-auto-links a real
+// account.
+const login = await resolveExternalIdentity(identityStore, accountPolicy, identity);
+
+// Authenticated settings flow only: current app session plus the same-browser
+// OAuth proof above. Matching verified email is required by default.
+const linked = await linkExternalIdentity(identityStore, accountPolicy, currentAccountId, identity);
+```
+
+`ExternalIdentityStore` performs atomic binding/claim operations and enforces a
+unique `(issuer, subject)` binding. `AccountIdentityPolicy` is where each app
+expresses registration, invitation, tenancy, allowlist, and placeholder rules.
+There is deliberately no `allowDangerousEmailAccountLinking` switch.
+
+Run both conformance suites against a real database adapter:
+
+```ts
+import { runExternalIdentityStoreConformanceTests } from '@andrewpopov/auth-kit/conformance';
+
+runExternalIdentityStoreConformanceTests(makeStore, prepareFixture, { describe, it, expect });
+```
 
 ## Refresh-token session rotation (with reuse detection)
 
@@ -220,6 +309,11 @@ revoked family).
 | `DEFAULT_ROTATION_GRACE_MS` | `30_000` — suggested opt-in value; NOT the default (`graceMs` defaults to `0`). |
 | `createMemoryRefreshTokenStore()` | In-memory `RefreshTokenStore` — test double, not for production. |
 | `runRefreshTokenStoreConformanceTests(makeStore, { describe, it, expect }, opts?)` | From `@andrewpopov/auth-kit/conformance`. Adapter conformance suite — run against a REAL store before trusting it. Test-runner primitives are injected, not imported. |
+| `createOAuthState` / `verifyOAuthState` / `requireSameBrowserOAuthState` | Signed short-lived OAuth intent and same-browser callback binding. |
+| `createPkcePair` / `createGoogleAuthorizationUrl` | PKCE S256 and Google authorization URL construction. |
+| `exchangeGoogleAuthorizationCode` | Code exchange plus injected cryptographic ID-token verifier, producing `ExternalIdentity`. |
+| `resolveExternalIdentity` / `linkExternalIdentity` | Provider-neutral login resolution and authenticated explicit linking. |
+| `runExternalIdentityStoreConformanceTests` | Real-adapter identity binding, placeholder, and concurrency conformance suite. |
 
 ## Standards
 

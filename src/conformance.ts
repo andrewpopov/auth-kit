@@ -1,10 +1,16 @@
 import crypto from 'crypto';
 import {
   createRefreshToken,
+  linkExternalIdentity,
   rotateRefreshToken,
+  resolveExternalIdentity,
   hashOpaqueToken,
   generateOpaqueToken,
   DEFAULT_ROTATION_GRACE_MS,
+  type AccountIdentityPolicy,
+  type AccountIdentityRecord,
+  type ExternalIdentity,
+  type ExternalIdentityStore,
   type RefreshTokenStore,
 } from './index';
 
@@ -14,6 +20,8 @@ const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export interface ExpectLike {
   (actual: unknown): {
     toBe(expected: unknown): void;
+    toEqual(expected: unknown): void;
+    toMatchObject(expected: object): void;
     toBeNull(): void;
     toContain(expected: unknown): void;
     toBeGreaterThan(expected: number): void;
@@ -27,6 +35,23 @@ export interface ExpectLike {
     };
   };
 }
+
+export interface IdentityStoreConformancePreparation {
+  /** Insert test accounts into the real adapter without binding an external identity. */
+  createAccount(account: AccountIdentityRecord): Promise<void>;
+}
+
+const conformanceIdentity: ExternalIdentity = {
+  issuer: 'https://accounts.google.com',
+  subject: 'auth-kit-conformance-subject',
+  email: 'identity-conformance@example.test',
+  emailVerified: true,
+};
+
+const conformancePolicy: AccountIdentityPolicy = {
+  mayProvision: () => true,
+  mayClaimPlaceholder: () => true,
+};
 
 /**
  * The test-runner primitives the suite is run against — INJECTED, same idiom
@@ -216,5 +241,69 @@ export function runRefreshTokenStoreConformanceTests(
         }
       },
     );
+  });
+}
+
+/**
+ * ExternalIdentityStore PORT CONFORMANCE SUITE. Unlike refresh sessions, this
+ * protocol spans two unique namespaces: local account ids and (issuer,
+ * subject). `bindExternalIdentity` and `claimPlaceholder` must decide and act
+ * atomically — a select followed by an unconditional update permits two
+ * accounts to win the same Google subject under real database concurrency.
+ *
+ * Consumers provide a test-only preparation adapter because account schemas
+ * differ. It must insert exactly the supplied account attributes into the real
+ * database; no fake in-memory store proves database uniqueness or CAS safety.
+ */
+export function runExternalIdentityStoreConformanceTests(
+  makeStore: () => ExternalIdentityStore | Promise<ExternalIdentityStore>,
+  prepare: (store: ExternalIdentityStore) => IdentityStoreConformancePreparation | Promise<IdentityStoreConformancePreparation>,
+  harness: ConformanceTestHarness,
+  options?: { concurrency?: number },
+): void {
+  const { describe, it, expect } = harness;
+  const concurrency = options?.concurrency ?? 20;
+
+  describe('ExternalIdentityStore conformance', () => {
+    it('resolves a returning identity by issuer + subject, not email', async () => {
+      const store = await makeStore();
+      const fixture = await prepare(store);
+      await fixture.createAccount({ id: 'identity-returning', email: 'old@example.test', emailVerified: true, disabled: false, hasCredentials: true });
+      expect((await store.bindExternalIdentity('identity-returning', conformanceIdentity)).status).toBe('linked');
+      const result = await resolveExternalIdentity(store, conformancePolicy, { ...conformanceIdentity, email: 'changed@example.test' });
+      expect(result).toMatchObject({ outcome: 'returning', account: { id: 'identity-returning' } });
+    });
+
+    it('never adopts a credentialed matching-email account from an unauthenticated callback', async () => {
+      const store = await makeStore();
+      const fixture = await prepare(store);
+      await fixture.createAccount({ id: 'identity-credentialed', email: conformanceIdentity.email, emailVerified: true, disabled: false, hasCredentials: true });
+      const result = await resolveExternalIdentity(store, conformancePolicy, conformanceIdentity);
+      expect(result).toMatchObject({ outcome: 'account-exists', account: { id: 'identity-credentialed' } });
+      expect(await store.findAccountByExternalIdentity(conformanceIdentity)).toBeNull();
+    });
+
+    it('claims only an unverified, uncredentialed matching-email placeholder', async () => {
+      const store = await makeStore();
+      const fixture = await prepare(store);
+      await fixture.createAccount({ id: 'identity-placeholder', email: conformanceIdentity.email, emailVerified: false, disabled: false, hasCredentials: false });
+      const result = await resolveExternalIdentity(store, conformancePolicy, conformanceIdentity);
+      expect(result).toMatchObject({ outcome: 'claimed-placeholder', account: { id: 'identity-placeholder' } });
+    });
+
+    it('canaries subject uniqueness under real concurrency: exactly one account links the same identity', async () => {
+      const store = await makeStore();
+      const fixture = await prepare(store);
+      await Promise.all(Array.from({ length: concurrency }, (_, index) =>
+        fixture.createAccount({ id: `identity-race-${index}`, email: `identity-race-${index}@example.test`, emailVerified: true, disabled: false, hasCredentials: true }),
+      ));
+      const attempts = await Promise.all(Array.from({ length: concurrency }, (_, index) =>
+        linkExternalIdentity(store, conformancePolicy, `identity-race-${index}`, { ...conformanceIdentity, email: `identity-race-${index}@example.test` }),
+      ));
+      const linked = attempts.filter(result => result.outcome === 'linked').length;
+      expect(linked).toBe(1);
+      const owner = await store.findAccountByExternalIdentity(conformanceIdentity);
+      expect(owner).not.toBeNull();
+    });
   });
 }

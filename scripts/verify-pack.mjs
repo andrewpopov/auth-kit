@@ -40,6 +40,15 @@ const EXPECTED = [
   'revokeRefreshToken',
   'isEpochValid',
   'createMemoryRefreshTokenStore',
+  'createOAuthState',
+  'verifyOAuthState',
+  'requireSameBrowserOAuthState',
+  'createPkcePair',
+  'createGoogleAuthorizationUrl',
+  'externalIdentityFromVerifiedGoogleClaims',
+  'exchangeGoogleAuthorizationCode',
+  'resolveExternalIdentity',
+  'linkExternalIdentity',
 ];
 
 function run(cmd, args, opts = {}) {
@@ -86,7 +95,7 @@ try {
   run('npm', ['install', '--no-audit', '--no-fund', tarballPath], { cwd: consumerDir, stdio: 'inherit' });
 
   const names = JSON.stringify(EXPECTED);
-  const conformanceNames = JSON.stringify(['runRefreshTokenStoreConformanceTests']);
+  const conformanceNames = JSON.stringify(['runRefreshTokenStoreConformanceTests', 'runExternalIdentityStoreConformanceTests']);
 
   // 2. CommonJS require smoke — main entry and ./conformance.
   const cjsSmoke = `
