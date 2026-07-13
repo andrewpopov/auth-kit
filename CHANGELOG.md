@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2
+
+Fix — expose `./package.json` in the `exports` map. Without it,
+`require('@andrewpopov/auth-kit/package.json')` threw
+`ERR_PACKAGE_PATH_NOT_EXPORTED` — which broke the standards' own documented way of
+verifying an INSTALLED version, the guard against the `github:` re-resolve trap.
+
+No runtime change.
+
 ## 0.2.1
 
 Fixes three defects found by an adversarial review of 0.2.0, before any
