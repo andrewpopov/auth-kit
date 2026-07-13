@@ -6,6 +6,7 @@
   rotation grace windows with `AuthPolicyError` rather than creating expired or
   otherwise nonsensical credentials.
 - Add `npm run verify` for the local release gate.
+- Upgrade the Vitest development toolchain to a version with no known advisories.
 
 ## 0.3.0
 
