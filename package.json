@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/auth-kit",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Authentication primitives: bcrypt password hashing (injected impl, cost 12, optional SHA-256 pre-hash + timing-safe dummy hash), single-use SHA-256 opaque tokens (reset/invite/email-change) — both pure and stateless — and refresh-token session rotation with reuse detection: a stateful protocol (family-kill-on-replay, epoch-based global invalidation, opt-in benign-race grace window) run against an injected `RefreshTokenStore` port. Storage, RBAC, and the JWT library stay app-specific. Ships an adapter conformance test suite (`/conformance`) for verifying a real store's atomicity.",
   "author": "Andrew Popov",
   "license": "MIT",
@@ -14,7 +14,8 @@
     "./conformance": {
       "types": "./dist/conformance.d.ts",
       "default": "./dist/conformance.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"
