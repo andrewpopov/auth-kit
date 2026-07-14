@@ -14,6 +14,9 @@ import {
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 describe('createRefreshToken', () => {
+  it.each([0, -1, 1.5])('rejects invalid token TTLs: %s', async (ttlMs) => {
+    await expect(createRefreshToken(createMemoryRefreshTokenStore(), 'user-1', ttlMs)).rejects.toThrow(/ttlMs/);
+  });
   it('issues a token, starting a new family, storing only its hash', async () => {
     const store = createMemoryRefreshTokenStore();
     const issued = await createRefreshToken(store, 'user-1', TTL_MS);
@@ -53,10 +56,7 @@ describe('rotateRefreshToken — normal rotation', () => {
 describe('property 4 — a revoked/expired token is rejected', () => {
   it('rejects an already-expired, never-rotated token as invalid (not reuse — nothing to attribute)', async () => {
     const store = createMemoryRefreshTokenStore();
-    const issued = await createRefreshToken(store, 'user-1', -1); // expiresAt already in the past
-
-    const result = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
-    expect(result.outcome).toBe('invalid');
+    await expect(createRefreshToken(store, 'user-1', -1)).rejects.toThrow(/ttlMs/);
   });
 
   it('rejects a logged-out (revoked, never rotated) token, and does not resurrect it via the grace window', async () => {

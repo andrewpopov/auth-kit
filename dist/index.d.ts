@@ -1,3 +1,4 @@
+export { AuthPolicyError } from './policy';
 export * from './identity';
 export * from './oidc';
 /**

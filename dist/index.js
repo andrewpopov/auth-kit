@@ -17,7 +17,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_ROTATION_GRACE_MS = exports.hashResetToken = exports.generateResetToken = exports.DEFAULT_BCRYPT_ROUNDS = void 0;
+exports.DEFAULT_ROTATION_GRACE_MS = exports.hashResetToken = exports.generateResetToken = exports.DEFAULT_BCRYPT_ROUNDS = exports.AuthPolicyError = void 0;
 exports.generateOpaqueToken = generateOpaqueToken;
 exports.hashOpaqueToken = hashOpaqueToken;
 exports.verifyOpaqueToken = verifyOpaqueToken;
@@ -29,6 +29,9 @@ exports.revokeRefreshToken = revokeRefreshToken;
 exports.isEpochValid = isEpochValid;
 exports.createMemoryRefreshTokenStore = createMemoryRefreshTokenStore;
 const crypto_1 = __importDefault(require("crypto"));
+const policy_1 = require("./policy");
+var policy_2 = require("./policy");
+Object.defineProperty(exports, "AuthPolicyError", { enumerable: true, get: function () { return policy_2.AuthPolicyError; } });
 __exportStar(require("./identity"), exports);
 __exportStar(require("./oidc"), exports);
 /**
@@ -88,6 +91,7 @@ function prehashPassword(password) {
 /** Create a password hasher bound to a bcrypt implementation and policy. */
 function createPasswordHasher(options) {
     const rounds = options.rounds ?? exports.DEFAULT_BCRYPT_ROUNDS;
+    (0, policy_1.requireBcryptRounds)(rounds);
     const prep = (password) => (options.preHash ? prehashPassword(password) : password);
     let cachedDummy = null;
     return {
@@ -115,6 +119,7 @@ function createPasswordHasher(options) {
 exports.DEFAULT_ROTATION_GRACE_MS = 30000;
 /** Issue a fresh refresh token, starting a new family (login/register/reauthentication). */
 async function createRefreshToken(store, userId, ttlMs, options) {
+    (0, policy_1.requirePositiveTtl)(ttlMs);
     const now = options?.now ?? new Date();
     const familyId = options?.familyId ?? crypto_1.default.randomUUID();
     const rawToken = generateOpaqueToken();
@@ -158,8 +163,10 @@ async function createRefreshToken(store, userId, ttlMs, options) {
  * open (see README).
  */
 async function rotateRefreshToken(store, rawToken, ttlMs, options) {
+    (0, policy_1.requirePositiveTtl)(ttlMs);
     const now = options?.now ?? new Date();
     const graceMs = options?.graceMs ?? 0;
+    (0, policy_1.requireGraceMs)(graceMs);
     const oldTokenHash = hashOpaqueToken(rawToken);
     const rawNext = generateOpaqueToken();
     const result = await store.rotate(oldTokenHash, { id: crypto_1.default.randomUUID(), tokenHash: hashOpaqueToken(rawNext), expiresAt: new Date(now.getTime() + ttlMs) }, { graceMs, now });

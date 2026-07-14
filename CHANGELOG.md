@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Add public contribution, support, and private vulnerability-reporting policies.
+- Reject invalid bcrypt rounds, refresh-token TTLs, OAuth state TTLs, and
+  rotation grace windows with `AuthPolicyError` rather than creating expired or
+  otherwise nonsensical credentials.
+- Add `npm run verify` for the local release gate.
+- Upgrade the Vitest development toolchain to a version with no known advisories.
+
 ## 0.3.0
 
 Adds provider-neutral OAuth/OIDC external identity binding.

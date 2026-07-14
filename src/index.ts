@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import { requireBcryptRounds, requireGraceMs, requirePositiveTtl } from './policy';
+
+export { AuthPolicyError } from './policy';
 
 export * from './identity';
 export * from './oidc';
@@ -98,6 +101,7 @@ export interface PasswordHasher {
 /** Create a password hasher bound to a bcrypt implementation and policy. */
 export function createPasswordHasher(options: PasswordHasherOptions): PasswordHasher {
   const rounds = options.rounds ?? DEFAULT_BCRYPT_ROUNDS;
+  requireBcryptRounds(rounds);
   const prep = (password: string): string => (options.preHash ? prehashPassword(password) : password);
   let cachedDummy: string | null = null;
 
@@ -260,6 +264,7 @@ export async function createRefreshToken(
   ttlMs: number,
   options?: { familyId?: string; now?: Date },
 ): Promise<CreateRefreshTokenResult> {
+  requirePositiveTtl(ttlMs);
   const now = options?.now ?? new Date();
   const familyId = options?.familyId ?? crypto.randomUUID();
   const rawToken = generateOpaqueToken();
@@ -314,8 +319,10 @@ export async function rotateRefreshToken(
   ttlMs: number,
   options?: { graceMs?: number; now?: Date },
 ): Promise<RotateRefreshTokenResult> {
+  requirePositiveTtl(ttlMs);
   const now = options?.now ?? new Date();
   const graceMs = options?.graceMs ?? 0;
+  requireGraceMs(graceMs);
   const oldTokenHash = hashOpaqueToken(rawToken);
   const rawNext = generateOpaqueToken();
 

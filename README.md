@@ -317,4 +317,24 @@ revoked family).
 
 ## Standards
 
+## Policy validation
+
+`createPasswordHasher` accepts bcrypt rounds only in `4..31`. Refresh-token
+TTLs and OAuth state TTLs must be positive integer milliseconds; `graceMs` must
+be a non-negative integer. Invalid policy values throw `AuthPolicyError` before
+credentials or state are issued.
+
+## Verify locally
+
+```bash
+npm ci
+npm run verify
+npm audit --omit=dev --audit-level=high
+```
+
 See [`STANDARDS.md`](./STANDARDS.md) (synced from `agent_brain/knowledge/shared-package-standards.md`).
+
+## Project policies
+
+See [Contributing](./CONTRIBUTING.md), [Support](./SUPPORT.md), and the
+[Security Policy](./SECURITY.md). This package is licensed under [MIT](./LICENSE).

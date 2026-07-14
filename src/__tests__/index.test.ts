@@ -9,6 +9,7 @@ import {
   hashResetToken,
   prehashPassword,
   createPasswordHasher,
+  AuthPolicyError,
   DEFAULT_BCRYPT_ROUNDS,
   type BcryptLike,
 } from '../index';
@@ -83,6 +84,10 @@ describe('createPasswordHasher (logic, fake bcrypt)', () => {
     expect(hasher.rounds).toBe(14);
     await hasher.hash('pw');
     expect(bcrypt.hash).toHaveBeenCalledWith('pw', 14);
+  });
+
+  it.each([3, 32, 12.5, Number.NaN])('rejects invalid bcrypt rounds: %s', (rounds) => {
+    expect(() => createPasswordHasher({ bcrypt: fake(), rounds })).toThrow(AuthPolicyError);
   });
 
   it('caches the dummy hash and computes it via hashSync with the same policy', () => {
