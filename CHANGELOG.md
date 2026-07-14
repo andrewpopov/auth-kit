@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+- Add an opt-in `AccountIdentityPolicy.mayClaimCredentialedPlaceholder` method
+  that permits `resolveExternalIdentity` to claim a placeholder account that
+  HAS first-party credentials (a password). Default (method omitted) behavior
+  is byte-for-byte unchanged: the engine still refuses to claim a credentialed
+  placeholder. Only implement this if unverified accounts in your app are
+  inert (cannot log in, hold no sessions) — otherwise the opt-in would hand
+  over a live account. `!emailVerified`, matching email, and
+  `mayClaimPlaceholder` remain mandatory; the opt-in relaxes only the
+  first-party-credentials term.
+
 ## 0.3.1
 
 - Add public contribution, support, and private vulnerability-reporting policies.

@@ -70,12 +70,30 @@ export interface AccountIdentityPolicy {
     mayProvision(identity: ExternalIdentity): boolean | Promise<boolean>;
     /**
      * Placeholder claims are intentionally narrow. The engine already requires a
-     * verified matching email and no first-party credentials; apps may impose
-     * invitation, tenancy, or allowlist checks here.
+     * verified matching email; apps may impose invitation, tenancy, or allowlist
+     * checks here. By default the engine also requires no first-party
+     * credentials — see {@link mayClaimCredentialedPlaceholder} to relax that.
      */
     mayClaimPlaceholder(account: AccountIdentityRecord, identity: ExternalIdentity): boolean | Promise<boolean>;
     /** Apps can turn off profile/verified-email matching only with a deliberate policy. */
     requireMatchingEmailForLink?: boolean;
+    /**
+     * Permit claiming a placeholder that HAS first-party credentials (a
+     * password). Omitted = denied: the engine otherwise refuses, because
+     * nulling a password somebody set is destructive.
+     *
+     * Implement this ONLY if unverified accounts are inert in your app - they
+     * cannot log in and hold no sessions. Under that invariant an unverified
+     * credentialed row is a squat, not a real account, and claiming it is
+     * equivalent to an email-proven password reset. If unverified accounts CAN
+     * log in, do not implement it: you would be handing over a live account.
+     *
+     * Gate on the issuer here. `identity.emailVerified` proves control of the
+     * external account, NOT necessarily current control of the mailbox (a stale
+     * assertion can survive a recycled address), so only permit issuers you deem
+     * authoritative for the address.
+     */
+    mayClaimCredentialedPlaceholder?(account: AccountIdentityRecord, identity: ExternalIdentity): boolean | Promise<boolean>;
 }
 export interface IdentityAuditEvent {
     type: 'EXTERNAL_IDENTITY_LINKED' | 'EXTERNAL_IDENTITY_CLAIMED' | 'EXTERNAL_IDENTITY_PROVISIONED' | 'EXTERNAL_IDENTITY_REFUSED';
@@ -131,8 +149,10 @@ export type ExplicitLinkResolution = {
 };
 /**
  * Resolve an unauthenticated OAuth callback. It always starts with issuer +
- * subject; it NEVER auto-links a credentialed or independently verified local
- * account by email. The only email-based mutation allowed here is an explicit
+ * subject; it NEVER auto-links an independently verified local account by
+ * email, and it never claims a credentialed placeholder unless the policy
+ * implements `mayClaimCredentialedPlaceholder` and returns `true` for it. By
+ * default the only email-based mutation allowed here is an explicit
  * app-policy-approved claim of an uncredentialed, unverified placeholder.
  */
 export declare function resolveExternalIdentity(store: ExternalIdentityStore, policy: AccountIdentityPolicy, identity: ExternalIdentity, auditSink?: IdentityAuditSink): Promise<IdentityResolution>;
