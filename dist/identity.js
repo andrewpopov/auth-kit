@@ -25,8 +25,10 @@ async function audit(sink, event) {
 }
 /**
  * Resolve an unauthenticated OAuth callback. It always starts with issuer +
- * subject; it NEVER auto-links a credentialed or independently verified local
- * account by email. The only email-based mutation allowed here is an explicit
+ * subject; it NEVER auto-links an independently verified local account by
+ * email, and it never claims a credentialed placeholder unless the policy
+ * implements `mayClaimCredentialedPlaceholder` and returns `true` for it. By
+ * default the only email-based mutation allowed here is an explicit
  * app-policy-approved claim of an uncredentialed, unverified placeholder.
  */
 async function resolveExternalIdentity(store, policy, identity, auditSink) {
@@ -49,10 +51,12 @@ async function resolveExternalIdentity(store, policy, identity, auditSink) {
             await audit(auditSink, { type: 'EXTERNAL_IDENTITY_REFUSED', accountId: accountByEmail.id, identity, reason: 'disabled' });
             return { outcome: 'disabled', account: accountByEmail };
         }
-        const eligiblePlaceholder = !accountByEmail.hasCredentials &&
+        const credentialsPermit = !accountByEmail.hasCredentials ||
+            (await policy.mayClaimCredentialedPlaceholder?.(accountByEmail, identity)) === true;
+        const eligiblePlaceholder = credentialsPermit &&
             !accountByEmail.emailVerified &&
             sameEmail(accountByEmail, email) &&
-            await policy.mayClaimPlaceholder(accountByEmail, identity);
+            (await policy.mayClaimPlaceholder(accountByEmail, identity));
         if (eligiblePlaceholder) {
             const claim = await store.claimPlaceholder(accountByEmail.id, identity);
             if (claim.status === 'claimed') {
