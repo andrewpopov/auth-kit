@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0
+
+- **Behavior change (PKG-25):** `rotateRefreshToken`'s `graceMs` now
+  **defaults to `DEFAULT_ROTATION_GRACE_MS` (30s)** instead of `0`. Root
+  cause: consumers combining per-tab-only refresh dedup (no client-side
+  cross-tab coordination) with the old strict-by-default grace window would
+  have an ordinary sibling-tab refresh race misclassified as token reuse,
+  triggering family-wide revocation and logging the user out of every open
+  tab. The 30s window tolerates that benign race while still treating a
+  replay presented after the window — or any replay when `graceMs: 0` is
+  passed explicitly — as genuine reuse, revoking the family as before.
+  Deployments that require the original strict behavior (e.g. cairn) must now
+  pass `{ graceMs: 0 }` explicitly; see the README's "Upgrading to 0.5.0" and
+  "The grace-window trade" sections, including the recommended pairing with
+  `@andrewpopov/fetch-client-kit`'s `crossTabRefresh` for browser bearer-auth
+  clients.
+
 ## 0.4.0
 
 - Add an opt-in `AccountIdentityPolicy.mayClaimCredentialedPlaceholder` method
