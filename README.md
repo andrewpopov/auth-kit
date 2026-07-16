@@ -28,7 +28,7 @@ internally would break this package for any consumer resolving via CJS).
 ## Install
 
 ```
-npm install github:andrewpopov/auth-kit#v0.2.1
+npm install github:andrewpopov/auth-kit#v0.4.0
 ```
 
 > **Upgrading from 0.2.0?** This is a **breaking release** for anyone who
