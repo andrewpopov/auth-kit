@@ -123,11 +123,14 @@ export function createPasswordHasher(options: PasswordHasherOptions): PasswordHa
 //
 // Hand-written five times across the fleet (cairn, mizen, sano-os, smarthome,
 // savoro), each getting the subtleties differently. This composes: cairn's
-// family-kill-on-replay (the strict DEFAULT), mizen's `tokensValidFrom` epoch
-// for global invalidation, and sano-os's benign-race grace window (two tabs
-// refreshing near-simultaneously don't have to nuke the session) as an
-// OPT-IN — a grace window is a real reuse-detection bypass traded for UX, not
-// a pure win, so it does not ship on by default.
+// family-kill-on-replay, mizen's `tokensValidFrom` epoch for global
+// invalidation, and sano-os's benign-race grace window (two tabs refreshing
+// near-simultaneously don't have to nuke the session), which now ships ON by
+// default at `DEFAULT_ROTATION_GRACE_MS` (30s) — see PKG-25: a per-tab-only
+// refresh dedup plus a strict-by-default grace window meant a benign sibling-
+// tab race was routinely misclassified as reuse, logging users out of every
+// tab. A grace window is a real reuse-detection bypass traded for UX; pass
+// `graceMs: 0` to opt back into strict (cairn/mizen's original) behavior.
 //
 // A refresh token IS an opaque token: generate -> sha256 -> store the hash ->
 // compare (the primitives above). This layer adds the rotation state machine
@@ -240,14 +243,15 @@ export interface RefreshTokenStore {
 }
 
 /**
- * Two presentations of the same token within this many ms of its rotation MAY
- * be treated as a benign multi-tab race instead of theft (sano-os's value) —
- * but only if a consumer opts in via `{ graceMs: DEFAULT_ROTATION_GRACE_MS }`.
- * NOT the default (see {@link rotateRefreshToken}): a grace window is an
- * explicit reuse-detection bypass traded for UX, and a stolen token replayed
- * inside it is laundered into a legitimate-looking sibling session with
- * nothing revoked or flagged. cairn deliberately refuses this trade. A
- * security default must be the strict one.
+ * Two presentations of the same token within this many ms of its rotation are
+ * treated as a benign multi-tab race instead of theft (sano-os's value) — see
+ * {@link rotateRefreshToken}, whose `graceMs` now DEFAULTS to this constant.
+ * This is a real, honest reuse-detection bypass traded for UX: a stolen token
+ * replayed inside the window is laundered into a legitimate-looking sibling
+ * session with nothing revoked or flagged. Pass `graceMs: 0` explicitly to
+ * restore the original strict behavior (any replay of an already-rotated
+ * token is reuse, full stop) — cairn/mizen's deployments that need that
+ * guarantee should do so explicitly rather than relying on the default.
  */
 export const DEFAULT_ROTATION_GRACE_MS = 30_000;
 
@@ -305,13 +309,17 @@ export type RotateRefreshTokenResult =
  * - Otherwise -> the CAS wins: the old token is marked revoked+replaced, a
  *   new token is issued in the same family -> `rotated`.
  *
- * `graceMs` defaults to `0` (strict — cairn/mizen's behavior: any replay of
- * an already-rotated token is reuse, full stop). Passing
- * `DEFAULT_ROTATION_GRACE_MS` opts into sano-os's 30s benign-race window,
- * which is a real, honest security/UX trade: a stolen token replayed inside
- * that window is issued a fresh, valid sibling and nothing is flagged — the
- * theft is laundered into a legitimate-looking session. Opt in only with eyes
- * open (see README).
+ * `graceMs` defaults to {@link DEFAULT_ROTATION_GRACE_MS} (30s — sano-os's
+ * benign-race window, on by default as of 0.5.0; see PKG-25). This is a real,
+ * honest security/UX trade: a stolen token replayed inside that window is
+ * issued a fresh, valid sibling and nothing is flagged — the theft is
+ * laundered into a legitimate-looking session. Pass `graceMs: 0` explicitly
+ * to restore the original strict behavior (cairn/mizen's: any replay of an
+ * already-rotated token is reuse, full stop). Browser clients using bearer
+ * auth across multiple tabs should pair this default with a client-side
+ * single-flight refresh guard (e.g. fetch-client-kit's `crossTabRefresh`) —
+ * the grace window absorbs the residual race, the client control prevents
+ * most races from happening at all.
  */
 export async function rotateRefreshToken(
   store: RefreshTokenStore,
@@ -321,7 +329,7 @@ export async function rotateRefreshToken(
 ): Promise<RotateRefreshTokenResult> {
   requirePositiveTtl(ttlMs);
   const now = options?.now ?? new Date();
-  const graceMs = options?.graceMs ?? 0;
+  const graceMs = options?.graceMs ?? DEFAULT_ROTATION_GRACE_MS;
   requireGraceMs(graceMs);
   const oldTokenHash = hashOpaqueToken(rawToken);
   const rawNext = generateOpaqueToken();

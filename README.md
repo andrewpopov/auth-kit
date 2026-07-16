@@ -35,11 +35,13 @@ npm install github:andrewpopov/auth-kit#v0.4.0
 > implemented the `RefreshTokenStore` port directly (no shipped adapter was
 > merged yet, so this should affect nobody in the fleet today). See
 > [`CHANGELOG.md`](./CHANGELOG.md) for what changed and why, and the
-> "Implementing `RefreshTokenStore`" section below for the new contract. Also:
-> the refresh-rotation **grace window now defaults to `0`** (was 30s) — if you
-> want the old benign-race behavior back, pass
-> `{ graceMs: DEFAULT_ROTATION_GRACE_MS }` explicitly to `rotateRefreshToken`,
-> having read "The grace-window trade" below first.
+> "Implementing `RefreshTokenStore`" section below for the new contract.
+
+> **Upgrading to 0.5.0?** PKG-25: the refresh-rotation **grace window now
+> defaults to `DEFAULT_ROTATION_GRACE_MS` (30s)**, not `0`. If your deployment
+> needs the old strict behavior (any replay of an already-rotated token is
+> reuse, full stop), pass `{ graceMs: 0 }` explicitly to `rotateRefreshToken`.
+> Read "The grace-window trade" below before relying on either default.
 
 ## Password hashing
 
@@ -164,10 +166,11 @@ runExternalIdentityStoreConformanceTests(makeStore, prepareFixture, { describe, 
 ## Refresh-token session rotation (with reuse detection)
 
 Hand-written five times across the fleet, each getting the subtleties
-differently. Composes: cairn's family-kill-on-replay (the **default**, strict
-behavior), mizen's `tokensValidFrom` epoch for global invalidation, and
-sano-os's benign-race grace window as an **opt-in** (see "The grace-window
-trade" below — it is not a pure win, and cairn deliberately refuses it).
+differently. Composes: cairn's family-kill-on-replay, mizen's
+`tokensValidFrom` epoch for global invalidation, and sano-os's benign-race
+grace window — which now ships **on by default**, at 30s (see "The
+grace-window trade" below — it is not a pure win, and you can opt back into
+cairn's strict posture with `graceMs: 0`).
 
 Storage is **injected** via `RefreshTokenStore` — implement it against
 Prisma/pg/Drizzle/whatever; auth-kit owns only the rotation algorithm. A
@@ -209,16 +212,15 @@ if (!isEpochValid(claims.epoch, await store.getEpoch(user.id))) throw new Error(
 ```
 
 `rotateRefreshToken`'s third argument accepts `{ graceMs?, now? }` —
-`graceMs` **defaults to `0`** (cairn/mizen's strict behavior: any replay of an
-already-rotated token is reuse, full stop). Pass
-`{ graceMs: DEFAULT_ROTATION_GRACE_MS }` (30s, sano-os's value) to opt into
-the benign multi-tab-race window — read the trade below first.
+`graceMs` **defaults to `DEFAULT_ROTATION_GRACE_MS` (30s, sano-os's value)**
+as of 0.5.0 (PKG-25). Pass `{ graceMs: 0 }` explicitly to restore the
+original strict behavior (cairn/mizen's: any replay of an already-rotated
+token is reuse, full stop) — read the trade below either way.
 
-### The grace-window trade (read before you opt in)
+### The grace-window trade (read before you rely on the default)
 
 A grace window is **not a pure win** — it is a real reuse-detection bypass,
-traded for UX. If you pass `{ graceMs: DEFAULT_ROTATION_GRACE_MS }` (or any
-non-zero value):
+traded for UX. With the default `graceMs` (or any non-zero value):
 
 > An attacker who replays a stolen refresh token **within `graceMs` of its
 > legitimate rotation** is issued a fresh, valid **sibling** token in the same
@@ -228,14 +230,28 @@ non-zero value):
 > into a legitimate-looking session, and the victim sees nothing.**
 
 sano-os accepts this trade deliberately (two browser tabs refreshing near-
-simultaneously shouldn't both get logged out). **cairn explicitly refuses
-it** — its `auth.service.ts` has a comment reading *"we intentionally do NOT
-add a grace window"* — because a strict family-kill is a strictly stronger
-security posture, and a rolling reopening window on every rotation is a real
-cost. auth-kit is **not** a superset of cairn's behavior when a non-zero
-`graceMs` is configured; it is a deliberately weaker default that a consumer
-must opt into with full knowledge of the trade. The `0` default matches
-cairn's posture out of the box.
+simultaneously shouldn't both get logged out) — and as of PKG-25 that is also
+auth-kit's own default: a refresh dedup that only spans one tab, paired with
+a strict grace window, turned an ordinary sibling-tab race into "logged out
+of every tab." The cost is real: for up to 30 seconds after a legitimate
+rotation, an attacker holding the just-rotated token can still mint a valid
+sibling session with no revocation or signal. This default trades that
+bounded replay interval for multi-tab resilience. **cairn
+still runs strict** — its `auth.service.ts` has a comment reading *"we
+intentionally do NOT add a grace window"* — and deployments with that
+requirement should pass `{ graceMs: 0 }` explicitly rather than rely on the
+package default. auth-kit is **not** a superset of cairn's behavior when a
+non-zero `graceMs` is in effect; it is a deliberately weaker default that
+ships because it matches the majority of the fleet's browser-based bearer
+clients better than strict-by-default did.
+
+**Pair this with a client-side defense for browser bearer-auth clients.**
+The grace window is the server-side half of the fix; if your client is
+`@andrewpopov/fetch-client-kit`'s `bearerAuth`, also enable its
+`crossTabRefresh` option so sibling tabs coordinate a single in-flight
+refresh instead of each firing their own — the two controls together (client
+dedup first, server grace window as the backstop) close the footgun described
+in PKG-25 far better than either alone.
 
 ## Implementing `RefreshTokenStore`
 
@@ -287,9 +303,9 @@ runRefreshTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { desc
 
 It asserts (against N genuinely concurrent calls, not just sequential ones):
 single-use under concurrency, family-kill on reuse, the grace-window/benign-
-race behavior (including the `graceMs: 0` default), expiry/revocation
-rejection, and the Defect-A regression (no live token ever survives in a
-revoked family).
+race behavior (including both the `DEFAULT_ROTATION_GRACE_MS` default and the
+`graceMs: 0` strict opt-out), expiry/revocation rejection, and the Defect-A
+regression (no live token ever survives in a revoked family).
 
 ## API
 
@@ -306,7 +322,7 @@ revoked family).
 | `rotateRefreshToken(store, rawToken, ttlMs, opts?)` | Single-use atomic rotation + reuse detection. `→ { outcome: 'rotated'\|'reuse'\|'invalid', ... }`. |
 | `revokeRefreshToken(store, rawToken)` | Logout: revoke the token's whole family. |
 | `isEpochValid(tokenEpochMs, currentEpoch)` | Check an access token's `epoch` claim against the user's current epoch. |
-| `DEFAULT_ROTATION_GRACE_MS` | `30_000` — suggested opt-in value; NOT the default (`graceMs` defaults to `0`). |
+| `DEFAULT_ROTATION_GRACE_MS` | `30_000` — the default for `rotateRefreshToken`'s `graceMs` as of 0.5.0 (PKG-25). Pass `graceMs: 0` for the old strict behavior. |
 | `createMemoryRefreshTokenStore()` | In-memory `RefreshTokenStore` — test double, not for production. |
 | `runRefreshTokenStoreConformanceTests(makeStore, { describe, it, expect }, opts?)` | From `@andrewpopov/auth-kit/conformance`. Adapter conformance suite — run against a REAL store before trusting it. Test-runner primitives are injected, not imported. |
 | `createOAuthState` / `verifyOAuthState` / `requireSameBrowserOAuthState` | Signed short-lived OAuth intent and same-browser callback binding. |

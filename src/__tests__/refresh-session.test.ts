@@ -188,31 +188,69 @@ describe('property 3 — the benign race is NOT treated as an attack', () => {
   });
 });
 
-describe('Defect B — graceMs defaults to 0 (strict, opt-in-only grace window)', () => {
-  it('a replay of an already-rotated token WITHOUT an explicit graceMs is reuse, not a benign race, even though a replacement is active', async () => {
+describe('PKG-25 — graceMs defaults to DEFAULT_ROTATION_GRACE_MS (30s benign-race window on by default)', () => {
+  it('a replay of an already-rotated token WITHOUT an explicit graceMs, within 30s, is tolerated as a benign race (default is no longer strict)', async () => {
+    expect(DEFAULT_ROTATION_GRACE_MS).toBe(30_000);
+
     const store = createMemoryRefreshTokenStore();
     const issued = await createRefreshToken(store, 'user-1', TTL_MS);
 
     const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS); // no options at all
     expect(winner.outcome).toBe('rotated');
+    if (winner.outcome !== 'rotated') throw new Error('unreachable');
 
-    // Replayed an instant later — under the OLD default (30s) this would have
-    // been a benign race. Under the new default (0) it must be reuse.
+    // Replayed an instant later, still within the default 30s grace window —
+    // this is the sibling-tab race PKG-25 exists to stop from logging the
+    // whole session family out.
     const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
-    expect(replay.outcome).toBe('reuse');
+    expect(replay.outcome).toBe('rotated');
+    if (replay.outcome !== 'rotated') throw new Error('unreachable');
+    expect(replay.familyId).toBe(winner.familyId);
   });
 
-  it('DEFAULT_ROTATION_GRACE_MS is still exported as the suggested opt-in value, but is not applied unless passed explicitly', async () => {
-    expect(DEFAULT_ROTATION_GRACE_MS).toBe(30_000);
-
+  it('the window is inclusive: a replay at exactly t0 + DEFAULT_ROTATION_GRACE_MS is still tolerated as a benign race', async () => {
     const store = createMemoryRefreshTokenStore();
     const issued = await createRefreshToken(store, 'user-1', TTL_MS);
-    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS);
+    const t0 = new Date();
+
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: t0 }); // default graceMs
+    expect(winner.outcome).toBe('rotated');
+    if (winner.outcome !== 'rotated') throw new Error('unreachable');
+
+    const atBoundary = new Date(t0.getTime() + DEFAULT_ROTATION_GRACE_MS);
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: atBoundary });
+    expect(replay.outcome).toBe('rotated');
+    if (replay.outcome !== 'rotated') throw new Error('unreachable');
+    expect(replay.familyId).toBe(winner.familyId);
+  });
+
+  it('a replay presented after the default grace window has elapsed is still classified as reuse (family revoked)', async () => {
+    const store = createMemoryRefreshTokenStore();
+    const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+    const t0 = new Date();
+
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: t0 }); // default graceMs
     expect(winner.outcome).toBe('rotated');
 
-    // Opting in explicitly restores the benign-race behavior.
-    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: DEFAULT_ROTATION_GRACE_MS });
-    expect(replay.outcome).toBe('rotated');
+    const afterWindow = new Date(t0.getTime() + DEFAULT_ROTATION_GRACE_MS + 1);
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: afterWindow }); // still default graceMs
+    expect(replay.outcome).toBe('reuse');
+
+    // The family is fully dead, including the legitimate successor.
+    if (winner.outcome !== 'rotated') throw new Error('unreachable');
+    const successorAttempt = await rotateRefreshToken(store, winner.rawToken, TTL_MS, { now: afterWindow });
+    expect(successorAttempt.outcome).toBe('reuse');
+  });
+
+  it('graceMs: 0 explicitly restores strict behavior, rejecting even an immediate replay as reuse', async () => {
+    const store = createMemoryRefreshTokenStore();
+    const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: 0 });
+    expect(winner.outcome).toBe('rotated');
+
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { graceMs: 0 });
+    expect(replay.outcome).toBe('reuse');
   });
 });
 

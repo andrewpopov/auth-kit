@@ -171,14 +171,15 @@ export interface RefreshTokenStore {
     bumpEpoch(userId: string): Promise<Date>;
 }
 /**
- * Two presentations of the same token within this many ms of its rotation MAY
- * be treated as a benign multi-tab race instead of theft (sano-os's value) —
- * but only if a consumer opts in via `{ graceMs: DEFAULT_ROTATION_GRACE_MS }`.
- * NOT the default (see {@link rotateRefreshToken}): a grace window is an
- * explicit reuse-detection bypass traded for UX, and a stolen token replayed
- * inside it is laundered into a legitimate-looking sibling session with
- * nothing revoked or flagged. cairn deliberately refuses this trade. A
- * security default must be the strict one.
+ * Two presentations of the same token within this many ms of its rotation are
+ * treated as a benign multi-tab race instead of theft (sano-os's value) — see
+ * {@link rotateRefreshToken}, whose `graceMs` now DEFAULTS to this constant.
+ * This is a real, honest reuse-detection bypass traded for UX: a stolen token
+ * replayed inside the window is laundered into a legitimate-looking sibling
+ * session with nothing revoked or flagged. Pass `graceMs: 0` explicitly to
+ * restore the original strict behavior (any replay of an already-rotated
+ * token is reuse, full stop) — cairn/mizen's deployments that need that
+ * guarantee should do so explicitly rather than relying on the default.
  */
 export declare const DEFAULT_ROTATION_GRACE_MS = 30000;
 export interface CreateRefreshTokenResult {
@@ -223,13 +224,17 @@ export type RotateRefreshTokenResult = {
  * - Otherwise -> the CAS wins: the old token is marked revoked+replaced, a
  *   new token is issued in the same family -> `rotated`.
  *
- * `graceMs` defaults to `0` (strict — cairn/mizen's behavior: any replay of
- * an already-rotated token is reuse, full stop). Passing
- * `DEFAULT_ROTATION_GRACE_MS` opts into sano-os's 30s benign-race window,
- * which is a real, honest security/UX trade: a stolen token replayed inside
- * that window is issued a fresh, valid sibling and nothing is flagged — the
- * theft is laundered into a legitimate-looking session. Opt in only with eyes
- * open (see README).
+ * `graceMs` defaults to {@link DEFAULT_ROTATION_GRACE_MS} (30s — sano-os's
+ * benign-race window, on by default as of 0.5.0; see PKG-25). This is a real,
+ * honest security/UX trade: a stolen token replayed inside that window is
+ * issued a fresh, valid sibling and nothing is flagged — the theft is
+ * laundered into a legitimate-looking session. Pass `graceMs: 0` explicitly
+ * to restore the original strict behavior (cairn/mizen's: any replay of an
+ * already-rotated token is reuse, full stop). Browser clients using bearer
+ * auth across multiple tabs should pair this default with a client-side
+ * single-flight refresh guard (e.g. fetch-client-kit's `crossTabRefresh`) —
+ * the grace window absorbs the residual race, the client control prevents
+ * most races from happening at all.
  */
 export declare function rotateRefreshToken(store: RefreshTokenStore, rawToken: string, ttlMs: number, options?: {
     graceMs?: number;
