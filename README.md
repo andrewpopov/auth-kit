@@ -233,8 +233,10 @@ sano-os accepts this trade deliberately (two browser tabs refreshing near-
 simultaneously shouldn't both get logged out) — and as of PKG-25 that is also
 auth-kit's own default: a refresh dedup that only spans one tab, paired with
 a strict grace window, turned an ordinary sibling-tab race into "logged out
-of every tab." A 30s window absorbs that race without materially widening
-the attacker's opportunity (30 seconds is a narrow replay target). **cairn
+of every tab." The cost is real: for up to 30 seconds after a legitimate
+rotation, an attacker holding the just-rotated token can still mint a valid
+sibling session with no revocation or signal. This default trades that
+bounded replay interval for multi-tab resilience. **cairn
 still runs strict** — its `auth.service.ts` has a comment reading *"we
 intentionally do NOT add a grace window"* — and deployments with that
 requirement should pass `{ graceMs: 0 }` explicitly rather than rely on the

@@ -99,6 +99,16 @@ function runRefreshTokenStoreConformanceTests(makeStore, harness, options) {
             const replay = await (0, index_1.rotateRefreshToken)(store, issued.rawToken, TTL_MS); // no graceMs passed
             expect(replay.outcome).toBe('rotated');
         });
+        it('rotate(): the default window is inclusive — a replay at exactly DEFAULT_ROTATION_GRACE_MS is still benign', async () => {
+            const store = await makeStore();
+            const issued = await (0, index_1.createRefreshToken)(store, 'user-1', TTL_MS);
+            const t0 = new Date();
+            const winner = await (0, index_1.rotateRefreshToken)(store, issued.rawToken, TTL_MS, { now: t0 }); // no graceMs passed
+            expect(winner.outcome).toBe('rotated');
+            const atBoundary = new Date(t0.getTime() + index_1.DEFAULT_ROTATION_GRACE_MS);
+            const replay = await (0, index_1.rotateRefreshToken)(store, issued.rawToken, TTL_MS, { now: atBoundary }); // no graceMs passed
+            expect(replay.outcome).toBe('rotated');
+        });
         it('rotate(): graceMs defaults to DEFAULT_ROTATION_GRACE_MS — a replay outside the default window (no graceMs passed) is still reuse', async () => {
             const store = await makeStore();
             const issued = await (0, index_1.createRefreshToken)(store, 'user-1', TTL_MS);

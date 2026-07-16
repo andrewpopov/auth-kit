@@ -208,6 +208,22 @@ describe('PKG-25 — graceMs defaults to DEFAULT_ROTATION_GRACE_MS (30s benign-r
     expect(replay.familyId).toBe(winner.familyId);
   });
 
+  it('the window is inclusive: a replay at exactly t0 + DEFAULT_ROTATION_GRACE_MS is still tolerated as a benign race', async () => {
+    const store = createMemoryRefreshTokenStore();
+    const issued = await createRefreshToken(store, 'user-1', TTL_MS);
+    const t0 = new Date();
+
+    const winner = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: t0 }); // default graceMs
+    expect(winner.outcome).toBe('rotated');
+    if (winner.outcome !== 'rotated') throw new Error('unreachable');
+
+    const atBoundary = new Date(t0.getTime() + DEFAULT_ROTATION_GRACE_MS);
+    const replay = await rotateRefreshToken(store, issued.rawToken, TTL_MS, { now: atBoundary });
+    expect(replay.outcome).toBe('rotated');
+    if (replay.outcome !== 'rotated') throw new Error('unreachable');
+    expect(replay.familyId).toBe(winner.familyId);
+  });
+
   it('a replay presented after the default grace window has elapsed is still classified as reuse (family revoked)', async () => {
     const store = createMemoryRefreshTokenStore();
     const issued = await createRefreshToken(store, 'user-1', TTL_MS);
