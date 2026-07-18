@@ -5,6 +5,7 @@ CI checks. Before opening the release pull request or creating a tag, run:
 
 ```bash
 npm ci
+npm run verify:dist-fresh
 npm run verify
 npm audit --audit-level=high
 ```
