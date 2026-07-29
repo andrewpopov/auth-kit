@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0
+
+- ExternalIdentity.emailVerified is replaced by emailAuthority
+  `ExternalIdentity.emailVerified: boolean` is replaced by
+  `emailAuthority: 'none' | 'asserted' | 'hosted'`, because a boolean cannot express the
+  difference between "the issuer says this address is verified" and "the issuer is
+  authoritative for this address right now". Adapters built through
+  `externalIdentityFromVerifiedGoogleClaims` inherit the new value for free — pass the ID
+  token's `hd` claim through, which `GoogleIdTokenClaims` now accepts. Adapters that construct
+  `ExternalIdentity` by hand must supply `emailAuthority` themselves; the exported
+  `googleEmailAuthority(normalizedEmail, emailVerified, hd)` implements Google's documented
+  rule (`@gmail.com`/`@googlemail.com`, or `hd` present). `AccountIdentityRecord.emailVerified`
+  — the application's own local verification state — is a different fact and is unchanged.
+  Apps that gated `mayClaimCredentialedPlaceholder` on the issuer should drop that check: the
+  engine now enforces authority itself, and issuer-granular gating was never sufficient.
+- Manage releases with release-kit (fragment-based CHANGELOG + version bump)
+  Releases are now driven by release-kit: describe each change as a fragment under `.changes/unreleased/` and run `npm run release:cut` to compile them into a new CHANGELOG section, bump the version, and archive the fragments.
+- Refuse external-identity placeholder claims unless the issuer is authoritative for the address
+  `resolveExternalIdentity` permitted a placeholder claim — which nulls the account's password
+  and revokes its sessions — whenever the provider asserted a verified email. That assertion
+  proves control of the external account, not present control of the mailbox: a Google account
+  created against a third-party address keeps `email_verified: true` after the address changes
+  hands, so a former owner could claim the rightful owner's placeholder. The engine now refuses
+  any claim unless `emailAuthority` is `'hosted'`, checked before either policy hook runs, and
+  such identities resolve to `account-exists` instead. An unrecognized `emailAuthority` — from
+  a JavaScript consumer, a deserialized object, or a stale compiled adapter — fails closed and
+  yields `unverified-email` rather than being treated as verified. Note the bar cannot distinguish a
+  transferred *domain* — re-registering a lapsed domain confers genuine present authority over
+  its addresses, and an app-sent email challenge is no stronger there; only a factor bound to
+  the person is.
+
 ## 0.5.0
 
 - **Behavior change (PKG-25):** `rotateRefreshToken`'s `graceMs` now

@@ -7,13 +7,27 @@
  * owns the resolution order and refuses unsafe email-based adoption by
  * default.
  */
+/**
+ * How much the issuer's word is worth for this address.
+ *
+ * - `'none'`     — issuer asserts nothing (or asserts unverified).
+ * - `'asserted'` — issuer says verified, but is NOT authoritative for the address.
+ *                  The assertion can outlive the holder's control of the mailbox: a
+ *                  Google account created against a third-party address keeps
+ *                  `email_verified: true` after that address changes hands.
+ * - `'hosted'`   — the issuer hosts the address and is authoritative for it now
+ *                  (Google: `@gmail.com`, or `email_verified` with `hd` set).
+ *
+ * Authority is a property of the (issuer, address) PAIR, never of the issuer alone.
+ */
+export type EmailAuthority = 'none' | 'asserted' | 'hosted';
 export interface ExternalIdentity {
     /** OIDC issuer, normalized by the provider adapter (for Google: https://accounts.google.com). */
     issuer: string;
     /** Provider-stable subject. This, not email, is the durable identity key. */
     subject: string;
     email: string | null;
-    emailVerified: boolean;
+    emailAuthority: EmailAuthority;
     name?: string | null;
     picture?: string | null;
 }
@@ -88,10 +102,12 @@ export interface AccountIdentityPolicy {
      * equivalent to an email-proven password reset. If unverified accounts CAN
      * log in, do not implement it: you would be handing over a live account.
      *
-     * Gate on the issuer here. `identity.emailVerified` proves control of the
-     * external account, NOT necessarily current control of the mailbox (a stale
-     * assertion can survive a recycled address), so only permit issuers you deem
-     * authoritative for the address.
+     * The engine already refuses any claim unless `identity.emailAuthority ===
+     * 'hosted'` — the issuer must be authoritative for THIS address right now,
+     * not merely have asserted it verified at some point. That bar is not
+     * yours to loosen from here; this hook governs only the additional
+     * question of whether nulling a first-party credential is acceptable in
+     * this app once the engine has already let the claim through.
      */
     mayClaimCredentialedPlaceholder?(account: AccountIdentityRecord, identity: ExternalIdentity): boolean | Promise<boolean>;
 }

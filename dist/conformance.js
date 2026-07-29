@@ -12,7 +12,7 @@ const conformanceIdentity = {
     issuer: 'https://accounts.google.com',
     subject: 'auth-kit-conformance-subject',
     email: 'identity-conformance@example.test',
-    emailVerified: true,
+    emailAuthority: 'hosted',
 };
 const conformancePolicy = {
     mayProvision: () => true,
