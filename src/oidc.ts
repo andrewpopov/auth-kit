@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { ExternalIdentity } from './identity';
+import type { EmailAuthority, ExternalIdentity } from './identity';
 import { requirePositiveTtl } from './policy';
 
 const GOOGLE_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
@@ -143,8 +143,34 @@ export interface GoogleIdTokenClaims {
   sub?: unknown;
   email?: unknown;
   email_verified?: unknown;
+  hd?: unknown;
   name?: unknown;
   picture?: unknown;
+}
+
+/**
+ * Map Google claims to an {@link EmailAuthority}. Google is authoritative for
+ * an address only when it HOSTS that address right now:
+ *
+ * - `@gmail.com` / `@googlemail.com` (the latter is a legacy alias for the
+ *   same hosted mailbox space and must be treated identically).
+ * - Workspace: `hd` present, PRESENCE-ONLY. Google's documented rule for `hd`
+ *   is presence, not equality against the email's domain — do NOT "tighten"
+ *   this to `hd === domain`. Requiring equality would falsely reject
+ *   Workspace alias-domain users while buying no real security: a Workspace
+ *   admin controls the domain's mail either way, alias or primary.
+ *
+ * Anything else that is merely `email_verified: true` is `'asserted'`: Google
+ * vouched for the address at some point in the past, but a personal Google
+ * account can be created against (and keep verified status for) a
+ * third-party address that later changes hands, so that assertion is not
+ * proof of PRESENT mailbox control.
+ */
+export function googleEmailAuthority(normalizedEmail: string | null, emailVerified: boolean, hd: unknown): EmailAuthority {
+  if (!emailVerified || !normalizedEmail) return 'none';
+  if (normalizedEmail.endsWith('@gmail.com') || normalizedEmail.endsWith('@googlemail.com')) return 'hosted';
+  if (typeof hd === 'string' && hd.trim().length > 0) return 'hosted';
+  return 'asserted';
 }
 
 /**
@@ -161,7 +187,7 @@ export function externalIdentityFromVerifiedGoogleClaims(claims: GoogleIdTokenCl
     issuer: 'https://accounts.google.com',
     subject: claims.sub,
     email,
-    emailVerified,
+    emailAuthority: googleEmailAuthority(email, emailVerified, claims.hd),
     name: typeof claims.name === 'string' ? claims.name : null,
     picture: typeof claims.picture === 'string' ? claims.picture : null,
   };

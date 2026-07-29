@@ -12,7 +12,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolveExternalIdentity = resolveExternalIdentity;
 exports.linkExternalIdentity = linkExternalIdentity;
 function normalizedVerifiedEmail(identity) {
-    if (!identity.emailVerified || !identity.email)
+    if (identity.emailAuthority === 'none' || !identity.email)
         return null;
     const email = identity.email.trim().toLowerCase();
     return email.length > 0 ? email : null;
@@ -51,9 +51,24 @@ async function resolveExternalIdentity(store, policy, identity, auditSink) {
             await audit(auditSink, { type: 'EXTERNAL_IDENTITY_REFUSED', accountId: accountByEmail.id, identity, reason: 'disabled' });
             return { outcome: 'disabled', account: accountByEmail };
         }
-        const credentialsPermit = !accountByEmail.hasCredentials ||
-            (await policy.mayClaimCredentialedPlaceholder?.(accountByEmail, identity)) === true;
-        const eligiblePlaceholder = credentialsPermit &&
+        // Engine-level hard bar, checked before EITHER policy hook runs: a claim
+        // nulls a placeholder's password and revokes its sessions, so it may
+        // proceed only when the issuer is authoritative for the address RIGHT
+        // NOW. `'asserted'` proves the holder controlled the external account,
+        // not that they control the mailbox today, so it is never enough here —
+        // an app that wants a different bar expresses that through what its
+        // adapter emits as `emailAuthority`, not through a policy hook. Leading
+        // both `credentialsPermit` and `eligiblePlaceholder` with this flag means
+        // a non-authoritative identity short-circuits before
+        // `mayClaimCredentialedPlaceholder` or `mayClaimPlaceholder` ever fires —
+        // those hooks may audit or rate-limit, so calling them for a claim that
+        // can never proceed would pollute that trail.
+        const authoritative = identity.emailAuthority === 'hosted';
+        const credentialsPermit = authoritative &&
+            (!accountByEmail.hasCredentials ||
+                (await policy.mayClaimCredentialedPlaceholder?.(accountByEmail, identity)) === true);
+        const eligiblePlaceholder = authoritative &&
+            credentialsPermit &&
             !accountByEmail.emailVerified &&
             sameEmail(accountByEmail, email) &&
             (await policy.mayClaimPlaceholder(accountByEmail, identity));

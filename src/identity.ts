@@ -8,13 +8,28 @@
  * default.
  */
 
+/**
+ * How much the issuer's word is worth for this address.
+ *
+ * - `'none'`     — issuer asserts nothing (or asserts unverified).
+ * - `'asserted'` — issuer says verified, but is NOT authoritative for the address.
+ *                  The assertion can outlive the holder's control of the mailbox: a
+ *                  Google account created against a third-party address keeps
+ *                  `email_verified: true` after that address changes hands.
+ * - `'hosted'`   — the issuer hosts the address and is authoritative for it now
+ *                  (Google: `@gmail.com`, or `email_verified` with `hd` set).
+ *
+ * Authority is a property of the (issuer, address) PAIR, never of the issuer alone.
+ */
+export type EmailAuthority = 'none' | 'asserted' | 'hosted';
+
 export interface ExternalIdentity {
   /** OIDC issuer, normalized by the provider adapter (for Google: https://accounts.google.com). */
   issuer: string;
   /** Provider-stable subject. This, not email, is the durable identity key. */
   subject: string;
   email: string | null;
-  emailVerified: boolean;
+  emailAuthority: EmailAuthority;
   name?: string | null;
   picture?: string | null;
 }
@@ -83,10 +98,12 @@ export interface AccountIdentityPolicy {
    * equivalent to an email-proven password reset. If unverified accounts CAN
    * log in, do not implement it: you would be handing over a live account.
    *
-   * Gate on the issuer here. `identity.emailVerified` proves control of the
-   * external account, NOT necessarily current control of the mailbox (a stale
-   * assertion can survive a recycled address), so only permit issuers you deem
-   * authoritative for the address.
+   * The engine already refuses any claim unless `identity.emailAuthority ===
+   * 'hosted'` — the issuer must be authoritative for THIS address right now,
+   * not merely have asserted it verified at some point. That bar is not
+   * yours to loosen from here; this hook governs only the additional
+   * question of whether nulling a first-party credential is acceptable in
+   * this app once the engine has already let the claim through.
    */
   mayClaimCredentialedPlaceholder?(
     account: AccountIdentityRecord,
@@ -126,7 +143,7 @@ export type ExplicitLinkResolution =
   | { outcome: 'unverified-email' };
 
 function normalizedVerifiedEmail(identity: ExternalIdentity): string | null {
-  if (!identity.emailVerified || !identity.email) return null;
+  if (identity.emailAuthority === 'none' || !identity.email) return null;
   const email = identity.email.trim().toLowerCase();
   return email.length > 0 ? email : null;
 }
@@ -175,11 +192,26 @@ export async function resolveExternalIdentity(
       return { outcome: 'disabled', account: accountByEmail };
     }
 
+    // Engine-level hard bar, checked before EITHER policy hook runs: a claim
+    // nulls a placeholder's password and revokes its sessions, so it may
+    // proceed only when the issuer is authoritative for the address RIGHT
+    // NOW. `'asserted'` proves the holder controlled the external account,
+    // not that they control the mailbox today, so it is never enough here —
+    // an app that wants a different bar expresses that through what its
+    // adapter emits as `emailAuthority`, not through a policy hook. Leading
+    // both `credentialsPermit` and `eligiblePlaceholder` with this flag means
+    // a non-authoritative identity short-circuits before
+    // `mayClaimCredentialedPlaceholder` or `mayClaimPlaceholder` ever fires —
+    // those hooks may audit or rate-limit, so calling them for a claim that
+    // can never proceed would pollute that trail.
+    const authoritative = identity.emailAuthority === 'hosted';
     const credentialsPermit =
-      !accountByEmail.hasCredentials ||
-      (await policy.mayClaimCredentialedPlaceholder?.(accountByEmail, identity)) === true;
+      authoritative &&
+      (!accountByEmail.hasCredentials ||
+        (await policy.mayClaimCredentialedPlaceholder?.(accountByEmail, identity)) === true);
 
     const eligiblePlaceholder =
+      authoritative &&
       credentialsPermit &&
       !accountByEmail.emailVerified &&
       sameEmail(accountByEmail, email) &&

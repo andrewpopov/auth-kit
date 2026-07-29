@@ -8,6 +8,7 @@ exports.verifyOAuthState = verifyOAuthState;
 exports.requireSameBrowserOAuthState = requireSameBrowserOAuthState;
 exports.createPkcePair = createPkcePair;
 exports.createGoogleAuthorizationUrl = createGoogleAuthorizationUrl;
+exports.googleEmailAuthority = googleEmailAuthority;
 exports.externalIdentityFromVerifiedGoogleClaims = externalIdentityFromVerifiedGoogleClaims;
 exports.exchangeGoogleAuthorizationCode = exchangeGoogleAuthorizationCode;
 const crypto_1 = __importDefault(require("crypto"));
@@ -113,6 +114,33 @@ function createGoogleAuthorizationUrl(options) {
     return `https://accounts.google.com/o/oauth2/v2/auth?${query}`;
 }
 /**
+ * Map Google claims to an {@link EmailAuthority}. Google is authoritative for
+ * an address only when it HOSTS that address right now:
+ *
+ * - `@gmail.com` / `@googlemail.com` (the latter is a legacy alias for the
+ *   same hosted mailbox space and must be treated identically).
+ * - Workspace: `hd` present, PRESENCE-ONLY. Google's documented rule for `hd`
+ *   is presence, not equality against the email's domain — do NOT "tighten"
+ *   this to `hd === domain`. Requiring equality would falsely reject
+ *   Workspace alias-domain users while buying no real security: a Workspace
+ *   admin controls the domain's mail either way, alias or primary.
+ *
+ * Anything else that is merely `email_verified: true` is `'asserted'`: Google
+ * vouched for the address at some point in the past, but a personal Google
+ * account can be created against (and keep verified status for) a
+ * third-party address that later changes hands, so that assertion is not
+ * proof of PRESENT mailbox control.
+ */
+function googleEmailAuthority(normalizedEmail, emailVerified, hd) {
+    if (!emailVerified || !normalizedEmail)
+        return 'none';
+    if (normalizedEmail.endsWith('@gmail.com') || normalizedEmail.endsWith('@googlemail.com'))
+        return 'hosted';
+    if (typeof hd === 'string' && hd.trim().length > 0)
+        return 'hosted';
+    return 'asserted';
+}
+/**
  * Convert claims returned by a cryptographically verified Google ID-token
  * verifier into the package's provider-neutral identity. Signature/JWK
  * verification is intentionally injected: apps may use google-auth-library,
@@ -127,7 +155,7 @@ function externalIdentityFromVerifiedGoogleClaims(claims, clientId) {
         issuer: 'https://accounts.google.com',
         subject: claims.sub,
         email,
-        emailVerified,
+        emailAuthority: googleEmailAuthority(email, emailVerified, claims.hd),
         name: typeof claims.name === 'string' ? claims.name : null,
         picture: typeof claims.picture === 'string' ? claims.picture : null,
     };

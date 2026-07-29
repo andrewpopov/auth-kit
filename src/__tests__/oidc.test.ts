@@ -5,6 +5,7 @@ import {
   createPkcePair,
   exchangeGoogleAuthorizationCode,
   externalIdentityFromVerifiedGoogleClaims,
+  googleEmailAuthority,
   requireSameBrowserOAuthState,
   verifyOAuthState,
 } from '../index';
@@ -43,7 +44,7 @@ describe('OIDC proof primitives', () => {
 
   it('accepts only verified Google issuer, audience, and stable subject claims', () => {
     const valid = { iss: 'https://accounts.google.com', aud: 'client', sub: 'subject-1', email: 'Owner@Example.test', email_verified: true, name: 'Owner' };
-    expect(externalIdentityFromVerifiedGoogleClaims(valid, 'client')).toMatchObject({ issuer: 'https://accounts.google.com', subject: 'subject-1', email: 'owner@example.test', emailVerified: true });
+    expect(externalIdentityFromVerifiedGoogleClaims(valid, 'client')).toMatchObject({ issuer: 'https://accounts.google.com', subject: 'subject-1', email: 'owner@example.test', emailAuthority: 'asserted' });
     expect(externalIdentityFromVerifiedGoogleClaims({ ...valid, iss: 'https://evil.test' }, 'client')).toBeNull();
     expect(externalIdentityFromVerifiedGoogleClaims({ ...valid, aud: 'other' }, 'client')).toBeNull();
     expect(externalIdentityFromVerifiedGoogleClaims({ ...valid, sub: '' }, 'client')).toBeNull();
@@ -53,7 +54,38 @@ describe('OIDC proof primitives', () => {
     const verifier = { verify: vi.fn().mockResolvedValue({ iss: 'accounts.google.com', aud: 'client', sub: 'subject-1', email: 'owner@example.test', email_verified: true }) };
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id_token: 'signed-token' }) });
     const identity = await exchangeGoogleAuthorizationCode({ code: 'code', clientId: 'client', clientSecret: 'secret', redirectUri: 'https://app.test/callback', verifier, fetchImpl });
-    expect(identity).toMatchObject({ subject: 'subject-1', emailVerified: true });
+    expect(identity).toMatchObject({ subject: 'subject-1', emailAuthority: 'asserted' });
     expect(verifier.verify).toHaveBeenCalledWith('signed-token', 'client');
+  });
+});
+
+describe('googleEmailAuthority', () => {
+  it('a gmail.com address maps to hosted', () => {
+    expect(googleEmailAuthority('owner@gmail.com', true, undefined)).toBe('hosted');
+  });
+
+  it('a googlemail.com address (legacy Google-hosted alias) maps to hosted', () => {
+    expect(googleEmailAuthority('owner@googlemail.com', true, undefined)).toBe('hosted');
+  });
+
+  it('a non-empty hd string maps to hosted, regardless of the email domain', () => {
+    expect(googleEmailAuthority('owner@workspace-domain.test', true, 'workspace-domain.test')).toBe('hosted');
+  });
+
+  it('an empty (whitespace-only) hd string does NOT count as hosted — falls to asserted', () => {
+    expect(googleEmailAuthority('owner@workspace-domain.test', true, '   ')).toBe('asserted');
+  });
+
+  it('a non-string hd (number or object) does NOT count as hosted — falls to asserted', () => {
+    expect(googleEmailAuthority('owner@workspace-domain.test', true, 12345)).toBe('asserted');
+    expect(googleEmailAuthority('owner@workspace-domain.test', true, { domain: 'workspace-domain.test' })).toBe('asserted');
+  });
+
+  it('email_verified false with hd present still maps to none', () => {
+    expect(googleEmailAuthority('owner@workspace-domain.test', false, 'workspace-domain.test')).toBe('none');
+  });
+
+  it('an unverified plain address maps to none', () => {
+    expect(googleEmailAuthority('owner@example.test', false, undefined)).toBe('none');
   });
 });
