@@ -166,9 +166,16 @@ export interface GoogleIdTokenClaims {
  * third-party address that later changes hands, so that assertion is not
  * proof of PRESENT mailbox control.
  */
-export function googleEmailAuthority(normalizedEmail: string | null, emailVerified: boolean, hd: unknown): EmailAuthority {
-  if (!emailVerified || !normalizedEmail) return 'none';
-  if (normalizedEmail.endsWith('@gmail.com') || normalizedEmail.endsWith('@googlemail.com')) return 'hosted';
+export function googleEmailAuthority(rawEmail: string | null, emailVerified: boolean, hd: unknown): EmailAuthority {
+  // Exported, and hand-called by consumers who won't all have pre-normalized
+  // the address — normalize defensively here rather than trust the caller,
+  // so `Owner@GMAIL.COM` or a trailing-space address still hits the suffix
+  // checks below instead of silently under-classifying as 'asserted'. The
+  // parameter is deliberately NOT named `normalizedEmail`: that would imply a
+  // precondition callers must meet, and the whole point is that they need not.
+  const email = rawEmail?.trim().toLowerCase() ?? null;
+  if (!emailVerified || !email) return 'none';
+  if (email.endsWith('@gmail.com') || email.endsWith('@googlemail.com')) return 'hosted';
   if (typeof hd === 'string' && hd.trim().length > 0) return 'hosted';
   return 'asserted';
 }

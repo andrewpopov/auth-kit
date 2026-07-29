@@ -72,7 +72,7 @@ export interface GoogleIdTokenClaims {
  * third-party address that later changes hands, so that assertion is not
  * proof of PRESENT mailbox control.
  */
-export declare function googleEmailAuthority(normalizedEmail: string | null, emailVerified: boolean, hd: unknown): EmailAuthority;
+export declare function googleEmailAuthority(rawEmail: string | null, emailVerified: boolean, hd: unknown): EmailAuthority;
 /**
  * Convert claims returned by a cryptographically verified Google ID-token
  * verifier into the package's provider-neutral identity. Signature/JWK

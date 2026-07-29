@@ -174,10 +174,16 @@ describe('emailAuthority', () => {
 
   it('refuses a claim for asserted-only authority (uncredentialed placeholder)', async () => {
     const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: false, disabled: false, hasCredentials: false }]);
+    const mayClaimPlaceholder = vi.fn(() => true);
+    const spiedPolicy: AccountIdentityPolicy = { ...policy, mayClaimPlaceholder };
     const identity = google({ emailAuthority: 'asserted' });
-    const result = await resolveExternalIdentity(store, policy, identity);
+    const result = await resolveExternalIdentity(store, spiedPolicy, identity);
     expect(result).toMatchObject({ outcome: 'account-exists', account: { id: 'u1' } });
     expect(await store.findAccountByExternalIdentity(identity)).toBeNull();
+    // Symmetric to the mayClaimCredentialedPlaceholder assertion below: the
+    // engine bar precedes BOTH policy hooks, not just the one with
+    // credentials to gate.
+    expect(mayClaimPlaceholder).not.toHaveBeenCalled();
   });
 
   it('refuses a claim for asserted-only authority even when mayClaimCredentialedPlaceholder would permit it — the engine bar precedes the policy hook', async () => {
@@ -216,5 +222,18 @@ describe('emailAuthority', () => {
     const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
     const identity = google({ emailAuthority: 'asserted' });
     await expect(linkExternalIdentity(store, policy, 'u1', identity)).resolves.toMatchObject({ outcome: 'linked', account: { id: 'u1' } });
+  });
+
+  // A missing/invalid emailAuthority must fail CLOSED, not open. TypeScript
+  // rejects these at compile time, but a plain-JS consumer or an object
+  // deserialized from JSON (or read back from a stale build) bypasses that
+  // entirely, so the cast simulates the real runtime threat, not a contrived
+  // one.
+  it.each([undefined, 'verified', true])('emailAuthority=%s yields unverified-email, never claims/provisions/links', async (badValue) => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: false, disabled: false, hasCredentials: false }]);
+    const identity = { ...google(), emailAuthority: badValue } as unknown as ExternalIdentity;
+    const result = await resolveExternalIdentity(store, policy, identity);
+    expect(result).toEqual({ outcome: 'unverified-email' });
+    expect(await store.findAccountByExternalIdentity(identity)).toBeNull();
   });
 });

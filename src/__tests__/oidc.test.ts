@@ -50,6 +50,16 @@ describe('OIDC proof primitives', () => {
     expect(externalIdentityFromVerifiedGoogleClaims({ ...valid, sub: '' }, 'client')).toBeNull();
   });
 
+  it('produces emailAuthority hosted for a gmail.com address through the full adapter', () => {
+    const claims = { iss: 'https://accounts.google.com', aud: 'client', sub: 'subject-1', email: 'owner@gmail.com', email_verified: true, name: 'Owner' };
+    expect(externalIdentityFromVerifiedGoogleClaims(claims, 'client')).toMatchObject({ email: 'owner@gmail.com', emailAuthority: 'hosted' });
+  });
+
+  it('produces emailAuthority hosted for an hd-bearing Workspace claim through the full adapter', () => {
+    const claims = { iss: 'https://accounts.google.com', aud: 'client', sub: 'subject-1', email: 'owner@workspace-domain.test', email_verified: true, hd: 'workspace-domain.test', name: 'Owner' };
+    expect(externalIdentityFromVerifiedGoogleClaims(claims, 'client')).toMatchObject({ email: 'owner@workspace-domain.test', emailAuthority: 'hosted' });
+  });
+
   it('exchanges a code only through an injected cryptographic ID-token verifier', async () => {
     const verifier = { verify: vi.fn().mockResolvedValue({ iss: 'accounts.google.com', aud: 'client', sub: 'subject-1', email: 'owner@example.test', email_verified: true }) };
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id_token: 'signed-token' }) });
@@ -87,5 +97,14 @@ describe('googleEmailAuthority', () => {
 
   it('an unverified plain address maps to none', () => {
     expect(googleEmailAuthority('owner@example.test', false, undefined)).toBe('none');
+  });
+
+  it('an uppercase gmail address maps to hosted — the function normalizes defensively rather than trusting the caller', () => {
+    expect(googleEmailAuthority('Owner@GMAIL.COM', true, undefined)).toBe('hosted');
+  });
+
+  it('a gmail address with leading/trailing whitespace maps to hosted — the function normalizes defensively rather than trusting the caller', () => {
+    expect(googleEmailAuthority(' owner@gmail.com ', true, undefined)).toBe('hosted');
+    expect(googleEmailAuthority('owner@gmail.com ', true, undefined)).toBe('hosted');
   });
 });

@@ -143,7 +143,11 @@ export type ExplicitLinkResolution =
   | { outcome: 'unverified-email' };
 
 function normalizedVerifiedEmail(identity: ExternalIdentity): string | null {
-  if (identity.emailAuthority === 'none' || !identity.email) return null;
+  // Allowlist the two positive states, don't exclude 'none': TypeScript can't
+  // stop a JS consumer or a deserialized object from carrying undefined/bogus
+  // emailAuthority, and `!== 'none'` treats that as verified — fail OPEN.
+  // `!== 'asserted' && !== 'hosted'` fails CLOSED on anything unrecognized.
+  if ((identity.emailAuthority !== 'asserted' && identity.emailAuthority !== 'hosted') || !identity.email) return null;
   const email = identity.email.trim().toLowerCase();
   return email.length > 0 ? email : null;
 }
