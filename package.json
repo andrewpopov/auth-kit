@@ -1,6 +1,6 @@
 {
   "name": "@andrewpopov/auth-kit",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Authentication primitives: password hashing, opaque tokens, refresh-session rotation, and provider-neutral OIDC external-identity binding. OAuth proof, account linking, placeholder claims, and provisioning are run through injected storage/policy ports; user CRUD, RBAC, sessions, and framework adapters stay app-specific. Ships real-adapter conformance suites.",
   "author": "Andrew Popov",
   "license": "MIT",
@@ -55,7 +55,7 @@
     "release:hygiene": "release-kit hygiene"
   },
   "devDependencies": {
-    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.2.0",
+    "@andrewpopov/release-kit": "github:andrewpopov/release-kit#v0.3.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.14.0",
     "bcryptjs": "^2.4.3",
