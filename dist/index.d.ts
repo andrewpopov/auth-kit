@@ -1,29 +1,27 @@
 export { AuthPolicyError } from './policy';
 export * from './identity';
 export * from './oidc';
+export * from './opaque-token';
+export * from './single-use-token';
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
- * outside express-security-kit's scope. Password hashing and single-use opaque
- * tokens are pure and stateless. Refresh-token session rotation (below) is NOT
- * stateless — it is a stateful protocol run against an injected
- * `RefreshTokenStore` port; auth-kit owns the algorithm, never the storage
- * engine. The RBAC models, JWT library, and 2FA flows genuinely differ per app
- * and are deliberately NOT here.
+ * outside express-security-kit's scope. Password hashing is pure and
+ * stateless. Single-use opaque tokens have stateless primitives
+ * (generate/hash/verify, in `opaque-token.ts`) plus a stateful issue/redeem
+ * lifecycle (`single-use-token.ts`) run against an injected
+ * `SingleUseTokenStore` port — same shape as refresh-token rotation.
+ * Refresh-token session rotation (below) is NOT stateless — it is a
+ * stateful protocol run against an injected `RefreshTokenStore` port;
+ * auth-kit owns the algorithm, never the storage engine. The RBAC models,
+ * JWT library, and 2FA flows genuinely differ per app and are deliberately
+ * NOT here.
  *
  * bcrypt is INJECTED (not bundled): the native-`bcrypt` apps keep their library,
  * levelup keeps `bcryptjs`, and the package forces no implementation on anyone.
  * `bcrypt` and `bcryptjs` produce cross-verifiable `$2a$`/`$2b$` hashes.
  */
 export declare const DEFAULT_BCRYPT_ROUNDS = 12;
-/** Generate a random opaque token (64 lowercase hex chars, 256 bits). */
-export declare function generateOpaqueToken(): string;
-/** Hash a token for storage/comparison (SHA-256 hex). */
-export declare function hashOpaqueToken(token: string): string;
-/** Constant-time check of a raw token against a stored SHA-256 hash. */
-export declare function verifyOpaqueToken(rawToken: string, storedHash: string): boolean;
-export declare const generateResetToken: typeof generateOpaqueToken;
-export declare const hashResetToken: typeof hashOpaqueToken;
 /**
  * Pre-hash a password with SHA-256 before bcrypt. bcrypt silently truncates
  * inputs beyond 72 bytes, so a long passphrase carries less entropy than its

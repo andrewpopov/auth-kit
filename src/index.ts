@@ -1,20 +1,27 @@
 import crypto from 'crypto';
 import { requireBcryptRounds, requireGraceMs, requirePositiveTtl } from './policy';
+import { generateOpaqueToken, hashOpaqueToken } from './opaque-token';
 
 export { AuthPolicyError } from './policy';
 
 export * from './identity';
 export * from './oidc';
+export * from './opaque-token';
+export * from './single-use-token';
 
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
- * outside express-security-kit's scope. Password hashing and single-use opaque
- * tokens are pure and stateless. Refresh-token session rotation (below) is NOT
- * stateless — it is a stateful protocol run against an injected
- * `RefreshTokenStore` port; auth-kit owns the algorithm, never the storage
- * engine. The RBAC models, JWT library, and 2FA flows genuinely differ per app
- * and are deliberately NOT here.
+ * outside express-security-kit's scope. Password hashing is pure and
+ * stateless. Single-use opaque tokens have stateless primitives
+ * (generate/hash/verify, in `opaque-token.ts`) plus a stateful issue/redeem
+ * lifecycle (`single-use-token.ts`) run against an injected
+ * `SingleUseTokenStore` port — same shape as refresh-token rotation.
+ * Refresh-token session rotation (below) is NOT stateless — it is a
+ * stateful protocol run against an injected `RefreshTokenStore` port;
+ * auth-kit owns the algorithm, never the storage engine. The RBAC models,
+ * JWT library, and 2FA flows genuinely differ per app and are deliberately
+ * NOT here.
  *
  * bcrypt is INJECTED (not bundled): the native-`bcrypt` apps keep their library,
  * levelup keeps `bcryptjs`, and the package forces no implementation on anyone.
@@ -22,35 +29,6 @@ export * from './oidc';
  */
 
 export const DEFAULT_BCRYPT_ROUNDS = 12;
-
-// ---------------------------------------------------------------------------
-// Single-use opaque tokens (password reset, invite set-password, email change).
-// Only the SHA-256 HASH is ever persisted; the raw token lives only in the
-// emailed URL. One primitive backs every such flow. (cairn + bewks had literal
-// copies of this in lib/auth/resetToken.ts.)
-// ---------------------------------------------------------------------------
-
-/** Generate a random opaque token (64 lowercase hex chars, 256 bits). */
-export function generateOpaqueToken(): string {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-/** Hash a token for storage/comparison (SHA-256 hex). */
-export function hashOpaqueToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-/** Constant-time check of a raw token against a stored SHA-256 hash. */
-export function verifyOpaqueToken(rawToken: string, storedHash: string): boolean {
-  const given = Buffer.from(hashOpaqueToken(rawToken));
-  const want = Buffer.from(storedHash);
-  if (given.length !== want.length) return false;
-  return crypto.timingSafeEqual(given, want);
-}
-
-// Reset-token aliases — the historical names cairn/bewks used for the same primitive.
-export const generateResetToken = generateOpaqueToken;
-export const hashResetToken = hashOpaqueToken;
 
 // ---------------------------------------------------------------------------
 // Password hashing.

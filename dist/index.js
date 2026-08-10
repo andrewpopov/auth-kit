@@ -17,10 +17,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_ROTATION_GRACE_MS = exports.hashResetToken = exports.generateResetToken = exports.DEFAULT_BCRYPT_ROUNDS = exports.AuthPolicyError = void 0;
-exports.generateOpaqueToken = generateOpaqueToken;
-exports.hashOpaqueToken = hashOpaqueToken;
-exports.verifyOpaqueToken = verifyOpaqueToken;
+exports.DEFAULT_ROTATION_GRACE_MS = exports.DEFAULT_BCRYPT_ROUNDS = exports.AuthPolicyError = void 0;
 exports.prehashPassword = prehashPassword;
 exports.createPasswordHasher = createPasswordHasher;
 exports.createRefreshToken = createRefreshToken;
@@ -30,50 +27,32 @@ exports.isEpochValid = isEpochValid;
 exports.createMemoryRefreshTokenStore = createMemoryRefreshTokenStore;
 const crypto_1 = __importDefault(require("crypto"));
 const policy_1 = require("./policy");
+const opaque_token_1 = require("./opaque-token");
 var policy_2 = require("./policy");
 Object.defineProperty(exports, "AuthPolicyError", { enumerable: true, get: function () { return policy_2.AuthPolicyError; } });
 __exportStar(require("./identity"), exports);
 __exportStar(require("./oidc"), exports);
+__exportStar(require("./opaque-token"), exports);
+__exportStar(require("./single-use-token"), exports);
 /**
  * @andrewpopov/auth-kit — the authentication *primitives* that drifted across the
  * custom-JWT backends (bewks, cairn, savoro, towerpower, levelup, sano-os),
- * outside express-security-kit's scope. Password hashing and single-use opaque
- * tokens are pure and stateless. Refresh-token session rotation (below) is NOT
- * stateless — it is a stateful protocol run against an injected
- * `RefreshTokenStore` port; auth-kit owns the algorithm, never the storage
- * engine. The RBAC models, JWT library, and 2FA flows genuinely differ per app
- * and are deliberately NOT here.
+ * outside express-security-kit's scope. Password hashing is pure and
+ * stateless. Single-use opaque tokens have stateless primitives
+ * (generate/hash/verify, in `opaque-token.ts`) plus a stateful issue/redeem
+ * lifecycle (`single-use-token.ts`) run against an injected
+ * `SingleUseTokenStore` port — same shape as refresh-token rotation.
+ * Refresh-token session rotation (below) is NOT stateless — it is a
+ * stateful protocol run against an injected `RefreshTokenStore` port;
+ * auth-kit owns the algorithm, never the storage engine. The RBAC models,
+ * JWT library, and 2FA flows genuinely differ per app and are deliberately
+ * NOT here.
  *
  * bcrypt is INJECTED (not bundled): the native-`bcrypt` apps keep their library,
  * levelup keeps `bcryptjs`, and the package forces no implementation on anyone.
  * `bcrypt` and `bcryptjs` produce cross-verifiable `$2a$`/`$2b$` hashes.
  */
 exports.DEFAULT_BCRYPT_ROUNDS = 12;
-// ---------------------------------------------------------------------------
-// Single-use opaque tokens (password reset, invite set-password, email change).
-// Only the SHA-256 HASH is ever persisted; the raw token lives only in the
-// emailed URL. One primitive backs every such flow. (cairn + bewks had literal
-// copies of this in lib/auth/resetToken.ts.)
-// ---------------------------------------------------------------------------
-/** Generate a random opaque token (64 lowercase hex chars, 256 bits). */
-function generateOpaqueToken() {
-    return crypto_1.default.randomBytes(32).toString('hex');
-}
-/** Hash a token for storage/comparison (SHA-256 hex). */
-function hashOpaqueToken(token) {
-    return crypto_1.default.createHash('sha256').update(token).digest('hex');
-}
-/** Constant-time check of a raw token against a stored SHA-256 hash. */
-function verifyOpaqueToken(rawToken, storedHash) {
-    const given = Buffer.from(hashOpaqueToken(rawToken));
-    const want = Buffer.from(storedHash);
-    if (given.length !== want.length)
-        return false;
-    return crypto_1.default.timingSafeEqual(given, want);
-}
-// Reset-token aliases — the historical names cairn/bewks used for the same primitive.
-exports.generateResetToken = generateOpaqueToken;
-exports.hashResetToken = hashOpaqueToken;
 // ---------------------------------------------------------------------------
 // Password hashing.
 // ---------------------------------------------------------------------------
@@ -133,13 +112,13 @@ async function createRefreshToken(store, userId, ttlMs, options) {
     (0, policy_1.requirePositiveTtl)(ttlMs);
     const now = options?.now ?? new Date();
     const familyId = options?.familyId ?? crypto_1.default.randomUUID();
-    const rawToken = generateOpaqueToken();
+    const rawToken = (0, opaque_token_1.generateOpaqueToken)();
     const expiresAt = new Date(now.getTime() + ttlMs);
     await store.createSession({
         id: crypto_1.default.randomUUID(),
         familyId,
         userId,
-        tokenHash: hashOpaqueToken(rawToken),
+        tokenHash: (0, opaque_token_1.hashOpaqueToken)(rawToken),
         expiresAt,
         revokedAt: null,
         replacedById: null,
@@ -182,9 +161,9 @@ async function rotateRefreshToken(store, rawToken, ttlMs, options) {
     const now = options?.now ?? new Date();
     const graceMs = options?.graceMs ?? exports.DEFAULT_ROTATION_GRACE_MS;
     (0, policy_1.requireGraceMs)(graceMs);
-    const oldTokenHash = hashOpaqueToken(rawToken);
-    const rawNext = generateOpaqueToken();
-    const result = await store.rotate(oldTokenHash, { id: crypto_1.default.randomUUID(), tokenHash: hashOpaqueToken(rawNext), expiresAt: new Date(now.getTime() + ttlMs) }, { graceMs, now });
+    const oldTokenHash = (0, opaque_token_1.hashOpaqueToken)(rawToken);
+    const rawNext = (0, opaque_token_1.generateOpaqueToken)();
+    const result = await store.rotate(oldTokenHash, { id: crypto_1.default.randomUUID(), tokenHash: (0, opaque_token_1.hashOpaqueToken)(rawNext), expiresAt: new Date(now.getTime() + ttlMs) }, { graceMs, now });
     switch (result.status) {
         case 'not-found':
         case 'expired':
@@ -204,7 +183,7 @@ async function rotateRefreshToken(store, rawToken, ttlMs, options) {
 }
 /** Revoke a session (logout). Finds the token's family and kills the whole family; a no-op if the token is already gone (already rotated/expired/garbage). */
 async function revokeRefreshToken(store, rawToken) {
-    const row = await store.findByHash(hashOpaqueToken(rawToken));
+    const row = await store.findByHash((0, opaque_token_1.hashOpaqueToken)(rawToken));
     if (row)
         await store.revokeFamily(row.familyId);
 }
