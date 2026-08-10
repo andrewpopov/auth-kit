@@ -131,9 +131,14 @@ export type RedeemSingleUseTokenResult = {
  *   can tell them apart.
  * - Already retired — by an earlier redeem OR by `invalidateAllFor` (the two
  *   are indistinguishable by design) -> `already-consumed`.
- * - Past `expiresAt` -> `expired`, and an expired token never subsequently
- *   becomes redeemable (checked inside the same atomic decision as
- *   everything else — see {@link SingleUseTokenStore.consume}).
+ * - `expiresAt <= now` (the `now` this call was given) -> `expired`, checked
+ *   inside the same atomic decision as everything else — see
+ *   {@link SingleUseTokenStore.consume}. Expiry writes nothing: an expired
+ *   token is not retired, so it stays `expired` only for as long as `now`
+ *   keeps moving forward from one call to the next. `now` is a host-supplied
+ *   test seam here, exactly like `rotateRefreshToken`'s `now` in `index.ts`
+ *   — not attacker input. A host that calls this again with an earlier `now`
+ *   is rewinding its own clock, not defeating the contract.
  * - Otherwise -> `redeemed`, with the store's returned record.
  */
 export declare function redeemSingleUseToken(store: SingleUseTokenStore, rawToken: string, options: {

@@ -309,13 +309,15 @@ function runSingleUseTokenStoreConformanceTests(makeStore, harness, options) {
     // state makes a lucky pass across every round unlikely, not impossible —
     // this is a PROBABILISTIC canary, not a proof of atomicity.
     const raceRepeats = options?.raceRepeats ?? 5;
-    if (concurrency < 2) {
-        throw new Error(`runSingleUseTokenStoreConformanceTests: concurrency must be >= 2 (got ${concurrency}) — a suite run with ` +
-            'concurrency 1 would "pass" while testing nothing, which is worse than not running it.');
+    if (!Number.isInteger(concurrency) || concurrency < 2) {
+        throw new Error(`runSingleUseTokenStoreConformanceTests: concurrency must be an integer >= 2 (got ${concurrency}) — a suite run ` +
+            'with concurrency 1 (or a non-finite value like NaN, which passes a bare `< 2` check) would "pass" while ' +
+            'testing nothing, which is worse than not running it.');
     }
-    if (raceRepeats < 1) {
-        throw new Error(`runSingleUseTokenStoreConformanceTests: raceRepeats must be >= 1 (got ${raceRepeats}) — a suite run with ` +
-            'raceRepeats 0 would register the race case but never execute a single round of it, which is worse than not running it.');
+    if (!Number.isInteger(raceRepeats) || raceRepeats < 1) {
+        throw new Error(`runSingleUseTokenStoreConformanceTests: raceRepeats must be an integer >= 1 (got ${raceRepeats}) — a suite run ` +
+            'with raceRepeats 0 (or a non-finite value like NaN, which passes a bare `< 1` check) would register the race ' +
+            'case but run zero rounds of it, passing vacuously, which is worse than not running it.');
     }
     describe('SingleUseTokenStore conformance', () => {
         it('happy path: redeems, with the issued purpose/subjectId and consumedAt === now on the record', async () => {
@@ -366,12 +368,31 @@ function runSingleUseTokenStoreConformanceTests(makeStore, harness, options) {
                 expect(alreadyConsumedCount).toBe(concurrency - 1);
             }
         });
-        it(`consume() racing invalidateAllFor() on the same subject+purpose, repeated ${raceRepeats}x over fresh tokens: ` +
-            'whatever the racing consume() returns, a subsequent consume() MUST report `already-consumed`, and the ' +
-            'token must never be redeemable after the invalidation has resolved. PROBABILISTIC, like the canary above — ' +
-            'and unlike that one, a fully deterministic proof here is not available at all: it would need an adapter ' +
-            'synchronization hook (a way to pause the adapter mid-transaction) that this port does not expose. Repeating ' +
-            'over fresh tokens is the best available signal, not a proof.', async () => {
+        it('invalidateAllFor() resolving BEFORE consume() is called: DETERMINISTIC, no ordering ambiguity — once ' +
+            'invalidateAllFor() has fully resolved, the linearization requirement (its commit is the linearization ' +
+            'point — see {@link SingleUseTokenStore.consume}) is completely observable through this port, so a ' +
+            'subsequent consume() on a token it covered MUST report `already-consumed`, never `consumed`. This is the ' +
+            'case a non-atomic read-then-write consume() (one that already read the row before invalidateAllFor() ' +
+            'committed, in the SAME call) cannot be caught by directly — see the concurrent variant below for that.', async () => {
+            const store = await makeStore();
+            const subjectId = 'user-invalidate-then-consume';
+            const issued = await (0, index_1.issueSingleUseToken)(store, { purpose: 'password-reset', subjectId, ttlMs: SINGLE_USE_TTL_MS });
+            const tokenHash = (0, index_1.hashOpaqueToken)(issued.rawToken);
+            await store.invalidateAllFor(subjectId, 'password-reset');
+            const result = await store.consume(tokenHash, { purpose: 'password-reset', now: new Date() });
+            expect(result.status).toBe('already-consumed');
+        });
+        it(`consume() racing invalidateAllFor() on the same subject+purpose, repeated ${raceRepeats}x over fresh tokens — ` +
+            'a SMOKE TEST that the two operations do not corrupt each other under real concurrent I/O. This is NOT a ' +
+            'linearization proof: through this port there is no way to observe which of the two committed first, so a ' +
+            'consume() that reads the row before invalidateAllFor() commits and then WRITES after it commits — the exact ' +
+            'linearization violation the contract forbids — is indistinguishable here from a legitimate win, because ' +
+            '`raceResult.status === \'consumed\'` is accepted either way. A real proof would need an adapter ' +
+            'synchronization hook (a way to pause a transaction mid-flight so the test can force the interleaving) that ' +
+            'this port does not expose; the deterministic case above is what actually gates that violation. What this ' +
+            'case DOES assert: both calls resolve without throwing, and the store is left internally consistent ' +
+            'afterward (a follow-up consume() reports a well-formed status, `consumed` or `already-consumed`, not a ' +
+            'result the token retirement makes impossible).', async () => {
             const store = await makeStore();
             for (let round = 0; round < raceRepeats; round++) {
                 const subjectId = `user-invalidate-race-${round}`;
@@ -386,7 +407,7 @@ function runSingleUseTokenStoreConformanceTests(makeStore, harness, options) {
                 expect(after.status).toBe('already-consumed');
             }
         });
-        it('expiry is decided INSIDE the atomic consume(): a token past expiresAt -> expired, and never subsequently becomes redeemable', async () => {
+        it('expiry is decided INSIDE the atomic consume(): a token past expiresAt -> expired, and advancing time keeps it expired', async () => {
             const store = await makeStore();
             const issuedAt = new Date('2026-01-01T00:00:00.000Z');
             const issued = await (0, index_1.issueSingleUseToken)(store, {
@@ -453,6 +474,25 @@ function runSingleUseTokenStoreConformanceTests(makeStore, harness, options) {
             };
             await store.issue(record);
             await expect(store.issue({ ...record, id: crypto_1.default.randomUUID() })).rejects.toThrow();
+        });
+        it(`issue(): tokenHash uniqueness under GENUINE concurrency — issuing the SAME tokenHash from ${concurrency} ` +
+            'parallel callers, exactly one succeeds and the rest reject. The sequential duplicate-tokenHash case above ' +
+            'cannot catch a non-atomic check-then-insert adapter: it can let two rows share a tokenHash when the checks ' +
+            'race, and the uniqueness invariant exists precisely so that never happens — two rows sharing a hash would ' +
+            'let two concurrent consume() calls each win a DIFFERENT row, the exact double-redeem the whole ' +
+            'consume()-atomicity contract is meant to prevent.', async () => {
+            const store = await makeStore();
+            const tokenHash = (0, index_1.hashOpaqueToken)((0, index_1.generateOpaqueToken)());
+            const attempts = await Promise.allSettled(Array.from({ length: concurrency }, () => store.issue({
+                id: crypto_1.default.randomUUID(),
+                purpose: 'password-reset',
+                subjectId: 'user-issue-race',
+                tokenHash,
+                expiresAt: new Date(Date.now() + SINGLE_USE_TTL_MS),
+                consumedAt: null,
+            })));
+            const succeeded = attempts.filter((result) => result.status === 'fulfilled').length;
+            expect(succeeded).toBe(1);
         });
     });
 }

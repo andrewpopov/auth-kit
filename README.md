@@ -384,13 +384,34 @@ runSingleUseTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { de
 It asserts: the happy path and sequential replay, single-use under N
 genuinely concurrent `consume()` calls on the same token (asserting both the
 one winner AND the N-1 losers report `already-consumed`, not just counting
-winners), a `consume()` racing `invalidateAllFor()` never leaves a token both
-invalidated and redeemable, expiry decided inside the same atomic decision
-(including the `now === expiresAt` boundary), purpose isolation, and
-`invalidateAllFor`'s no-delete/idempotency contract. `options.concurrency`
-(default 20) and `options.raceRepeats` (default 5) are validated, not just
-defaulted — passing `concurrency: 1` or `raceRepeats: 0` throws, since a race
-that can't lose isn't testing anything.
+winners), `tokenHash` uniqueness under N genuinely concurrent `issue()` calls
+on the same hash (exactly one succeeds — the sequential duplicate-`issue`
+case alone can't catch a non-atomic check-then-insert adapter, since nothing
+races it), that `consume()` reports `already-consumed` once a prior
+`invalidateAllFor()` call has fully resolved (deterministic, no ordering
+ambiguity), expiry rejecting a token under sequential calls with a fixed
+`now` (including the `now === expiresAt` boundary), purpose isolation, and
+`invalidateAllFor`'s no-delete/idempotency contract.
+
+Two things this suite does **not** prove, so read past the green checkmark:
+the `consume()`-vs-`invalidateAllFor()` race case beyond the deterministic
+check above is a SMOKE TEST that the two calls don't corrupt each other under
+real concurrent I/O, not a linearization proof — this port exposes no way to
+observe which of the two committed first, so a consume() that reads before
+and writes after invalidateAllFor() commits (the exact violation the
+contract forbids) is indistinguishable here from a legitimate win; proving
+that ordering would need an adapter synchronization hook this port doesn't
+expose. And the expiry case above only ever calls `consume()` sequentially
+with a fixed `now`, so it cannot establish that expiry is decided *inside*
+the adapter's transaction (an adapter that checks expiry outside its
+transaction still passes) — the contract in `SingleUseTokenStore.consume`'s
+doc comment still requires in-transaction expiry, this suite just doesn't
+verify it.
+
+`options.concurrency` (default 20) and `options.raceRepeats` (default 5) are
+validated, not just defaulted — passing a non-integer, a non-finite value
+(`NaN`, `Infinity`), `concurrency < 2`, or `raceRepeats < 1` throws, since a
+race that can't lose isn't testing anything.
 
 ## API
 

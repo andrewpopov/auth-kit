@@ -107,7 +107,7 @@ describe('expiry', () => {
     expect(result.outcome).toBe('expired');
   });
 
-  it('an expired token never subsequently becomes redeemable as real time continues to advance', async () => {
+  it('expiry stays expired as real time continues to advance (a host that supplies an earlier `now` is rewinding its own clock, not something this test covers)', async () => {
     const store = createMemorySingleUseTokenStore();
     const issuedAt = new Date('2026-01-01T00:00:00.000Z');
     const issued = await issueSingleUseToken(store, { purpose: PURPOSE, subjectId: SUBJECT, ttlMs: TTL_MS, now: issuedAt });
@@ -160,6 +160,29 @@ describe('SingleUseTokenStore.issue invariants', () => {
     await expect(store.issue({ ...record, id: crypto.randomUUID() })).rejects.toThrow(/duplicate/i);
   });
 
+  it('rejects a duplicate id even when the tokenHash differs', async () => {
+    const store = createMemorySingleUseTokenStore();
+    const id = crypto.randomUUID();
+    await store.issue({
+      id,
+      purpose: PURPOSE,
+      subjectId: SUBJECT,
+      tokenHash: hashOpaqueToken('duplicate-id-token-a'),
+      expiresAt: new Date(Date.now() + TTL_MS),
+      consumedAt: null,
+    });
+    await expect(
+      store.issue({
+        id,
+        purpose: PURPOSE,
+        subjectId: SUBJECT,
+        tokenHash: hashOpaqueToken('duplicate-id-token-b'),
+        expiresAt: new Date(Date.now() + TTL_MS),
+        consumedAt: null,
+      }),
+    ).rejects.toThrow(/duplicate/i);
+  });
+
   it('rejects issuing a record with a non-null consumedAt', async () => {
     const store = createMemorySingleUseTokenStore();
     await expect(
@@ -172,6 +195,38 @@ describe('SingleUseTokenStore.issue invariants', () => {
         consumedAt: new Date(),
       }),
     ).rejects.toThrow(/consumed/i);
+  });
+});
+
+describe('SingleUseTokenStore Date immutability (issued records must not alias caller-owned Dates)', () => {
+  it("mutating issueSingleUseToken()'s returned expiresAt does not retroactively change the stored lifetime", async () => {
+    const store = createMemorySingleUseTokenStore();
+    const issued = await issueSingleUseToken(store, { purpose: PURPOSE, subjectId: SUBJECT, ttlMs: TTL_MS });
+    const originalExpiryMs = issued.expiresAt.getTime();
+
+    // issueSingleUseToken hands back the same Date object it passed to
+    // store.issue() — mutating it here must not reach into the store.
+    issued.expiresAt.setTime(0);
+
+    const result = await redeemSingleUseToken(store, issued.rawToken, { purpose: PURPOSE, now: new Date(originalExpiryMs - 1000) });
+    expect(result.outcome).toBe('redeemed');
+  });
+
+  it("mutating a returned consume() record's expiresAt does not retroactively change the stored lifetime", async () => {
+    const store = createMemorySingleUseTokenStore();
+    const issued = await issueSingleUseToken(store, { purpose: PURPOSE, subjectId: SUBJECT, ttlMs: TTL_MS });
+    const tokenHash = hashOpaqueToken(issued.rawToken);
+
+    // A purpose-mismatch probe writes nothing but still hands back a copy
+    // of the stored record.
+    const mismatch = await store.consume(tokenHash, { purpose: 'invite', now: new Date() });
+    expect(mismatch.status).toBe('purpose-mismatch');
+    if (mismatch.status !== 'purpose-mismatch') throw new Error('unreachable');
+    mismatch.record.expiresAt.setTime(0);
+
+    // The stored token must still honor its real TTL, unaffected by the mutation above.
+    const result = await store.consume(tokenHash, { purpose: PURPOSE, now: new Date() });
+    expect(result.status).toBe('consumed');
   });
 });
 

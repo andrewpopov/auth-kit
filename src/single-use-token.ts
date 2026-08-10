@@ -149,9 +149,14 @@ export type RedeemSingleUseTokenResult =
  *   can tell them apart.
  * - Already retired — by an earlier redeem OR by `invalidateAllFor` (the two
  *   are indistinguishable by design) -> `already-consumed`.
- * - Past `expiresAt` -> `expired`, and an expired token never subsequently
- *   becomes redeemable (checked inside the same atomic decision as
- *   everything else — see {@link SingleUseTokenStore.consume}).
+ * - `expiresAt <= now` (the `now` this call was given) -> `expired`, checked
+ *   inside the same atomic decision as everything else — see
+ *   {@link SingleUseTokenStore.consume}. Expiry writes nothing: an expired
+ *   token is not retired, so it stays `expired` only for as long as `now`
+ *   keeps moving forward from one call to the next. `now` is a host-supplied
+ *   test seam here, exactly like `rotateRefreshToken`'s `now` in `index.ts`
+ *   — not attacker input. A host that calls this again with an earlier `now`
+ *   is rewinding its own clock, not defeating the contract.
  * - Otherwise -> `redeemed`, with the store's returned record.
  */
 export async function redeemSingleUseToken(
@@ -194,15 +199,33 @@ export function createMemorySingleUseTokenStore(): SingleUseTokenStore {
     return undefined;
   }
 
+  // Clones every Date field, both when a record enters the store (`issue`)
+  // and when one leaves it (`consume`'s returned record). Without this, the
+  // stored record aliases whatever Date object the caller happened to pass
+  // in (or gets handed a reference to the store's own Date), so mutating
+  // that object in place — in either direction — would retroactively change
+  // the stored token's lifetime, violating the "purpose/subjectId/expiresAt
+  // are IMMUTABLE after issue" invariant the port contract states.
+  function cloneRecord(record: SingleUseTokenRecord): SingleUseTokenRecord {
+    return {
+      ...record,
+      expiresAt: new Date(record.expiresAt.getTime()),
+      consumedAt: record.consumedAt === null ? null : new Date(record.consumedAt.getTime()),
+    };
+  }
+
   return {
     async issue(record) {
       if (byHash(record.tokenHash)) {
         throw new Error(`SingleUseTokenStore: duplicate tokenHash ${record.tokenHash}`);
       }
+      if (tokens.has(record.id)) {
+        throw new Error(`SingleUseTokenStore: duplicate id ${record.id}`);
+      }
       if (record.consumedAt !== null) {
         throw new Error('SingleUseTokenStore: cannot issue an already-consumed record');
       }
-      tokens.set(record.id, { ...record });
+      tokens.set(record.id, cloneRecord(record));
     },
 
     // `async` but contains NO `await` — under Node's run-to-completion
@@ -217,12 +240,12 @@ export function createMemorySingleUseTokenStore(): SingleUseTokenStore {
     async consume(tokenHash, { purpose, now }) {
       const record = byHash(tokenHash);
       if (!record) return { status: 'not-found' };
-      if (record.purpose !== purpose) return { status: 'purpose-mismatch', record: { ...record } };
-      if (record.consumedAt !== null) return { status: 'already-consumed', record: { ...record } };
-      if (record.expiresAt.getTime() <= now.getTime()) return { status: 'expired', record: { ...record } };
+      if (record.purpose !== purpose) return { status: 'purpose-mismatch', record: cloneRecord(record) };
+      if (record.consumedAt !== null) return { status: 'already-consumed', record: cloneRecord(record) };
+      if (record.expiresAt.getTime() <= now.getTime()) return { status: 'expired', record: cloneRecord(record) };
 
-      record.consumedAt = now;
-      return { status: 'consumed', record: { ...record } };
+      record.consumedAt = new Date(now.getTime()); // clone `now` too — it's the caller's Date object
+      return { status: 'consumed', record: cloneRecord(record) };
     },
 
     async invalidateAllFor(subjectId, purpose) {
