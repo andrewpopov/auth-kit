@@ -139,6 +139,7 @@ export type ExplicitLinkResolution =
   | { outcome: 'disabled'; account: AccountIdentityRecord }
   | { outcome: 'identity-in-use' }
   | { outcome: 'account-already-linked' }
+  | { outcome: 'not-eligible' }
   | { outcome: 'not-found' }
   | { outcome: 'unverified-email' };
 
@@ -156,8 +157,48 @@ function sameEmail(account: AccountIdentityRecord, email: string): boolean {
   return account.email?.trim().toLowerCase() === email;
 }
 
+/**
+ * Record an audit event without ever letting a broken sink break the
+ * caller's otherwise-correct outcome — the same guarantee
+ * express-security-kit's `AuditBuffer` makes for its own sink (see
+ * `AuditBuffer.safeWarn`): isolate the failure, then surface it via
+ * `console.warn` (itself guarded, so a hostile/throwing console can't break
+ * this either) instead of silently dropping it.
+ */
+/**
+ * Record an audit event without ever letting a broken sink break the
+ * caller's otherwise-correct outcome — the same guarantee
+ * express-security-kit's `AuditBuffer` makes for its own sink (see
+ * `AuditBuffer.safeWarn`): isolate the failure, then surface it via
+ * `console.warn` (itself guarded, so a hostile/throwing console can't break
+ * this either) instead of silently dropping it.
+ */
 async function audit(sink: IdentityAuditSink | undefined, event: IdentityAuditEvent): Promise<void> {
-  await sink?.record(event);
+  if (!sink) return;
+  try {
+    await sink.record(event);
+  } catch (err) {
+    try {
+      console.warn('[auth-kit] identity audit sink failed', err);
+    } catch {
+      // console itself must never break the caller.
+    }
+  }
+}
+
+/**
+ * Shared refusal path for {@link linkExternalIdentity}: every refusal branch
+ * routes through here so the audit call can't drift out of sync with a new
+ * outcome (or silently get skipped on a new return) the way per-branch calls
+ * did before.
+ */
+async function refuseLink(
+  auditSink: IdentityAuditSink | undefined,
+  accountId: string,
+  identity: ExternalIdentity,
+  reason: string,
+): Promise<void> {
+  await audit(auditSink, { type: 'EXTERNAL_IDENTITY_REFUSED', accountId, identity, reason });
 }
 
 /**
@@ -264,21 +305,32 @@ export async function linkExternalIdentity(
   auditSink?: IdentityAuditSink,
 ): Promise<ExplicitLinkResolution> {
   const account = await store.findAccountById(currentAccountId);
-  if (!account) return { outcome: 'not-found' };
+  if (!account) {
+    // No account exists for the attempted id — audit against the ATTEMPTED
+    // id (there is no real account to attribute it to). That the id doesn't
+    // resolve is itself the interesting signal: this is exactly the shape of
+    // an account-enumeration probe, not a caller bug to stay silent about.
+    await refuseLink(auditSink, currentAccountId, identity, 'not-found');
+    return { outcome: 'not-found' };
+  }
   if (account.disabled) {
-    await audit(auditSink, { type: 'EXTERNAL_IDENTITY_REFUSED', accountId: account.id, identity, reason: 'disabled' });
+    await refuseLink(auditSink, account.id, identity, 'disabled');
     return { outcome: 'disabled', account };
   }
   const email = normalizedVerifiedEmail(identity);
-  if (!email) return { outcome: 'unverified-email' };
+  if (!email) {
+    await refuseLink(auditSink, account.id, identity, 'unverified-email');
+    return { outcome: 'unverified-email' };
+  }
   if (policy.requireMatchingEmailForLink !== false && !sameEmail(account, email)) {
-    await audit(auditSink, { type: 'EXTERNAL_IDENTITY_REFUSED', accountId: account.id, identity, reason: 'email-mismatch' });
+    await refuseLink(auditSink, account.id, identity, 'email-mismatch');
     return { outcome: 'email-mismatch', account };
   }
 
   const owner = await store.findAccountByExternalIdentity(identity);
   if (owner) {
     if (owner.id === account.id) return { outcome: 'already-linked', account };
+    await refuseLink(auditSink, account.id, identity, 'identity-in-use');
     return { outcome: 'identity-in-use' };
   }
 
@@ -288,6 +340,19 @@ export async function linkExternalIdentity(
     return { outcome: 'linked', account };
   }
   if (result.status === 'already-linked') return { outcome: 'already-linked', account };
-  if (result.status === 'account-already-linked') return { outcome: 'account-already-linked' };
+  if (result.status === 'account-already-linked') {
+    await refuseLink(auditSink, account.id, identity, 'account-already-linked');
+    return { outcome: 'account-already-linked' };
+  }
+  // `store.bindExternalIdentity` promises a real `not-eligible` refusal
+  // reason (see `BindResult`); map it through directly instead of collapsing
+  // it into the generic `identity-in-use` catch-all below, which would tell
+  // the caller "this identity belongs to someone else" when the truth is
+  // "this account is not eligible to link".
+  if (result.status === 'not-eligible') {
+    await refuseLink(auditSink, account.id, identity, 'not-eligible');
+    return { outcome: 'not-eligible' };
+  }
+  await refuseLink(auditSink, account.id, identity, 'identity-in-use');
   return { outcome: 'identity-in-use' };
 }

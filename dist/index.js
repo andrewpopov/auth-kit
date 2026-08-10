@@ -100,7 +100,17 @@ function createPasswordHasher(options) {
         verify: (password, hash) => options.bcrypt.compare(prep(password), hash),
         dummyHash() {
             if (cachedDummy === null) {
-                cachedDummy = options.bcrypt.hashSync(prep('absent-user-timing-padding'), rounds);
+                // A random 256-bit plaintext, generated internally and never
+                // retained or exposed, so no CALLER-supplied password can ever match
+                // this hash (a fixed, documented plaintext like the literal string
+                // previously used here would itself verify successfully — it's
+                // public, right here in the source). See the `dummyHash` doc comment
+                // on `PasswordHasher` for the one caveat this does NOT cover: a host
+                // that wraps its own injected `bcrypt` can still observe this value.
+                // Computed once and cached: the cost (and the timing-padding
+                // behavior callers rely on) is paid
+                // once per hasher, same as before.
+                cachedDummy = options.bcrypt.hashSync(prep(crypto_1.default.randomBytes(32).toString('hex')), rounds);
             }
             return cachedDummy;
         },

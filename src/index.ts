@@ -91,9 +91,17 @@ export interface PasswordHasher {
   /** Verify a password against a stored hash. */
   verify(password: string, hash: string): Promise<boolean>;
   /**
-   * A valid bcrypt hash that no real password matches, computed once. Compare an
-   * incoming password against it on the account-absent / no-password branch so
-   * login timing stays uniform and leaks no account-existence signal.
+   * A valid bcrypt hash of a random, internally-generated plaintext that this
+   * package never exposes — computed once, then cached. Compare an incoming
+   * password against it on the account-absent / no-password branch so login
+   * timing stays uniform and leaks no account-existence signal. No password a
+   * caller passes to `hash`/`verify` can ever match it.
+   *
+   * Caveat: `bcrypt` is injected (see {@link PasswordHasherOptions.bcrypt}),
+   * so a host that wraps its own bcrypt implementation can observe the
+   * plaintext handed to it here, same as it can for every real `hash`/
+   * `verify` call. That's not a new capability the dummy hash grants — a host
+   * in that position already controls all password hashing in the process.
    */
   dummyHash(): string;
 }
@@ -111,7 +119,17 @@ export function createPasswordHasher(options: PasswordHasherOptions): PasswordHa
     verify: (password, hash) => options.bcrypt.compare(prep(password), hash),
     dummyHash() {
       if (cachedDummy === null) {
-        cachedDummy = options.bcrypt.hashSync(prep('absent-user-timing-padding'), rounds);
+        // A random 256-bit plaintext, generated internally and never
+        // retained or exposed, so no CALLER-supplied password can ever match
+        // this hash (a fixed, documented plaintext like the literal string
+        // previously used here would itself verify successfully — it's
+        // public, right here in the source). See the `dummyHash` doc comment
+        // on `PasswordHasher` for the one caveat this does NOT cover: a host
+        // that wraps its own injected `bcrypt` can still observe this value.
+        // Computed once and cached: the cost (and the timing-padding
+        // behavior callers rely on) is paid
+        // once per hasher, same as before.
+        cachedDummy = options.bcrypt.hashSync(prep(crypto.randomBytes(32).toString('hex')), rounds);
       }
       return cachedDummy;
     },

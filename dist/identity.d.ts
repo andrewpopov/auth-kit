@@ -159,6 +159,8 @@ export type ExplicitLinkResolution = {
 } | {
     outcome: 'account-already-linked';
 } | {
+    outcome: 'not-eligible';
+} | {
     outcome: 'not-found';
 } | {
     outcome: 'unverified-email';

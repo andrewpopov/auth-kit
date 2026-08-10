@@ -97,10 +97,45 @@ describe('createPasswordHasher (logic, fake bcrypt)', () => {
     const d2 = hasher.dummyHash();
     expect(d1).toBe(d2);
     expect(bcrypt.hashSync).toHaveBeenCalledTimes(1);
-    expect(bcrypt.hashSync).toHaveBeenCalledWith(prehashPassword('absent-user-timing-padding'), 12);
+    // The plaintext fed to hashSync is a random, internally-generated value
+    // (never a fixed literal) — assert the policy (preHash applied, so the
+    // arg is a 64-hex sha256 digest regardless of the random input; rounds
+    // 12) without pinning the plaintext itself.
+    const [preppedPlaintext, roundsUsed] = (bcrypt.hashSync as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(preppedPlaintext).toMatch(/^[0-9a-f]{64}$/);
+    expect(roundsUsed).toBe(12);
+  });
+
+  it('the dummy plaintext is random per hasher, not the previously-documented fixed literal', () => {
+    const bcryptA = fake();
+    const bcryptB = fake();
+    createPasswordHasher({ bcrypt: bcryptA, preHash: true }).dummyHash();
+    createPasswordHasher({ bcrypt: bcryptB, preHash: true }).dummyHash();
+    const plaintextA = (bcryptA.hashSync as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const plaintextB = (bcryptB.hashSync as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(plaintextA).not.toBe(prehashPassword('absent-user-timing-padding'));
+    expect(plaintextA).not.toBe(plaintextB);
+  });
+
+  it('DEFAULT mode (preHash omitted, i.e. false): hashSync receives the RAW random plaintext, not a digest of it — exactly what an injected bcrypt implementation observes', () => {
+    const bcryptA = fake();
+    const bcryptB = fake();
+    // No `preHash` option — this is the default path every other fake-bcrypt
+    // test above skips by passing `preHash: true`.
+    createPasswordHasher({ bcrypt: bcryptA }).dummyHash();
+    createPasswordHasher({ bcrypt: bcryptB }).dummyHash();
+    const plaintextA = (bcryptA.hashSync as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const plaintextB = (bcryptB.hashSync as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(plaintextA).toMatch(/^[0-9a-f]{64}$/);
+    expect(plaintextA).not.toBe('absent-user-timing-padding');
+    expect(plaintextA).not.toBe(plaintextB);
   });
 });
 
+// None of these hashers pass `preHash`, so they all run in DEFAULT mode —
+// bcryptjs sees the raw plaintext directly, not a SHA-256 digest of it. This
+// is deliberate: it is the real path most consumers hit, and the one where
+// the documented caveat below actually applies.
 describe('createPasswordHasher (real bcryptjs round-trip)', () => {
   it('hash then verify succeeds; a wrong password fails', async () => {
     const hasher = createPasswordHasher({ bcrypt: bcryptjs as unknown as BcryptLike, rounds: 8 });
@@ -115,6 +150,39 @@ describe('createPasswordHasher (real bcryptjs round-trip)', () => {
     const dummy = hasher.dummyHash();
     expect(dummy).toMatch(/^\$2[aby]\$/);
     expect(await hasher.verify('any password', dummy)).toBe(false);
+  });
+
+  it('the dummy hash does not verify against the previously-documented fixed plaintext — the guarantee is now genuinely true, not just documented', async () => {
+    const hasher = createPasswordHasher({ bcrypt: bcryptjs as unknown as BcryptLike, rounds: 8 });
+    const dummy = hasher.dummyHash();
+    // `dummyHash` used to derive its hash from this exact literal, so anyone
+    // reading the source (or this test) could produce a matching password.
+    expect(await hasher.verify('absent-user-timing-padding', dummy)).toBe(false);
+  });
+
+  it('documented caveat, proven rather than asserted: in DEFAULT mode, an injected bcrypt implementation that captures its own hashSync input CAN reconstruct a match', async () => {
+    let capturedPlaintext: string | null = null;
+    const capturingBcrypt: BcryptLike = {
+      hash: (data, rounds) => bcryptjs.hash(data, rounds),
+      compare: (data, hash) => bcryptjs.compare(data, hash),
+      hashSync: (data, rounds) => {
+        capturedPlaintext = data;
+        return bcryptjs.hashSync(data, rounds);
+      },
+    };
+    const hasher = createPasswordHasher({ bcrypt: capturingBcrypt, rounds: 8 }); // default preHash: false
+    const dummy = hasher.dummyHash();
+    expect(capturedPlaintext).not.toBeNull();
+    // This is the documented limit of the guarantee, not a bug: a host that
+    // wraps its own bcrypt implementation already controls every real
+    // password hash/verify call it makes, so observing the dummy plaintext
+    // here grants it nothing it didn't already have.
+    expect(await hasher.verify(capturedPlaintext!, dummy)).toBe(true);
+  });
+
+  it('the dummy hash is stable across repeated calls on the same hasher', () => {
+    const hasher = createPasswordHasher({ bcrypt: bcryptjs as unknown as BcryptLike, rounds: 8 });
+    expect(hasher.dummyHash()).toBe(hasher.dummyHash());
   });
 
   it('pre-hash and plain modes are NOT cross-compatible (migration guard)', async () => {
