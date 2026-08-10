@@ -65,15 +65,76 @@ a rehash-on-login migration: flipping it on plain-bcrypt hashes invalidates them
 
 ## Single-use tokens (reset / invite / email-change)
 
+Issuing a random token is the easy half; the "single-use" property — a
+redeemed or invalidated token can never redeem again, even under concurrent
+requests — is a storage problem, not a crypto one. That property is now a
+first-class port, `SingleUseTokenStore`, run through `issueSingleUseToken` /
+`redeemSingleUseToken`, the same shape as `RefreshTokenStore.rotate()`.
+auth-kit owns the algorithm; you implement the store against Prisma/pg/
+Drizzle/whatever. A `createMemorySingleUseTokenStore()` reference
+implementation ships for tests.
+
+```ts
+import {
+  issueSingleUseToken,
+  redeemSingleUseToken,
+  type SingleUseTokenStore,
+} from '@andrewpopov/auth-kit';
+
+const store: SingleUseTokenStore = /* your Prisma/pg/Drizzle-backed implementation */;
+const TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// Issue: email the raw token as a URL param, persist only its hash + expiry.
+const { rawToken, expiresAt } = await issueSingleUseToken(store, {
+  purpose: 'password-reset',
+  subjectId: user.id,
+  ttlMs: TTL_MS,
+});
+// -> mail a link containing rawToken; never persist it yourself.
+
+// Redeem: atomic, single-use, purpose-scoped.
+const result = await redeemSingleUseToken(store, presentedRawToken, { purpose: 'password-reset' });
+if (result.outcome === 'invalid') throw new Error('unknown token or wrong purpose');
+if (result.outcome === 'already-consumed') throw new Error('this link was already used');
+if (result.outcome === 'expired') throw new Error('this link expired — request a new one');
+// result.outcome === 'redeemed' -> result.record.subjectId is who to act on.
+```
+
+`store.consume()` is the one method that MUST be atomic — a single
+transaction / conditional `UPDATE`, not a select followed by an update. Two
+concurrent redeems of the same token must not both succeed. Run
+`runSingleUseTokenStoreConformanceTests` (below, under "Testing a real
+adapter") against your real store before trusting it; passing it against
+`createMemorySingleUseTokenStore()` proves nothing about a real adapter's
+atomicity, for the same reason the refresh-token suite doesn't.
+
+**Replace-on-issue (killing an old reset link when mailing a new one) is
+NOT atomic.** There is no `issueSingleUseToken(..., { invalidateExisting: true })`
+option, and none is planned — it would need a third atomic op
+(`issueReplacingOutstanding`) for what is really host policy. A host that
+wants "the newest link is the only valid one" calls `invalidateAllFor` then
+`issueSingleUseToken` itself, as two separate calls:
+
+```ts
+await store.invalidateAllFor(user.id, 'password-reset');
+const { rawToken } = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: user.id, ttlMs: TTL_MS });
+```
+
+Because these are two calls, not one transaction, a concurrent issue can
+leave more than one live token outstanding, and if the `issue` call fails
+after the `invalidateAllFor` succeeded, the old token is dead with no
+replacement minted. auth-kit does not paper over this — own the non-atomicity
+explicitly, or accept that a brief overlap window is possible.
+
+The raw primitives remain exported for hosts doing their own thing outside
+this lifecycle:
+
 ```ts
 import { generateOpaqueToken, hashOpaqueToken, verifyOpaqueToken } from '@andrewpopov/auth-kit';
 
-// Issue: email the raw token, persist only its hash + an expiry.
 const raw = generateOpaqueToken();
-await store({ tokenHash: hashOpaqueToken(raw), expiresAt });
-
-// Redeem: constant-time compare.
-if (!row || row.expiresAt < now || !verifyOpaqueToken(raw, row.tokenHash)) reject();
+const hash = hashOpaqueToken(raw);
+verifyOpaqueToken(raw, hash); // constant-time compare
 ```
 
 `generateResetToken` / `hashResetToken` are aliases for the historical names.
@@ -307,6 +368,51 @@ race behavior (including both the `DEFAULT_ROTATION_GRACE_MS` default and the
 `graceMs: 0` strict opt-out), expiry/revocation rejection, and the Defect-A
 regression (no live token ever survives in a revoked family).
 
+The same is true for `SingleUseTokenStore`: `createMemorySingleUseTokenStore().consume`
+is atomic "for free" for the same single-threaded, no-internal-`await` reason.
+Run `runSingleUseTokenStoreConformanceTests` against your real store before
+trusting it:
+
+```ts
+import { describe, it, expect } from 'vitest';
+import { runSingleUseTokenStoreConformanceTests } from '@andrewpopov/auth-kit/conformance';
+import { createMyPostgresStore } from '../src/postgres-store';
+
+runSingleUseTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { describe, it, expect });
+```
+
+It asserts: the happy path and sequential replay, single-use under N
+genuinely concurrent `consume()` calls on the same token (asserting both the
+one winner AND the N-1 losers report `already-consumed`, not just counting
+winners), `tokenHash` uniqueness under N genuinely concurrent `issue()` calls
+on the same hash (exactly one succeeds — the sequential duplicate-`issue`
+case alone can't catch a non-atomic check-then-insert adapter, since nothing
+races it), that `consume()` reports `already-consumed` once a prior
+`invalidateAllFor()` call has fully resolved (deterministic, no ordering
+ambiguity), expiry rejecting a token under sequential calls with a fixed
+`now` (including the `now === expiresAt` boundary), purpose isolation, and
+`invalidateAllFor`'s no-delete/idempotency contract.
+
+Two things this suite does **not** prove, so read past the green checkmark:
+the `consume()`-vs-`invalidateAllFor()` race case beyond the deterministic
+check above is a SMOKE TEST that the two calls don't corrupt each other under
+real concurrent I/O, not a linearization proof — this port exposes no way to
+observe which of the two committed first, so a consume() that reads before
+and writes after invalidateAllFor() commits (the exact violation the
+contract forbids) is indistinguishable here from a legitimate win; proving
+that ordering would need an adapter synchronization hook this port doesn't
+expose. And the expiry case above only ever calls `consume()` sequentially
+with a fixed `now`, so it cannot establish that expiry is decided *inside*
+the adapter's transaction (an adapter that checks expiry outside its
+transaction still passes) — the contract in `SingleUseTokenStore.consume`'s
+doc comment still requires in-transaction expiry, this suite just doesn't
+verify it.
+
+`options.concurrency` (default 20) and `options.raceRepeats` (default 5) are
+validated, not just defaulted — passing a non-integer, a non-finite value
+(`NaN`, `Infinity`), `concurrency < 2`, or `raceRepeats < 1` throws, since a
+race that can't lose isn't testing anything.
+
 ## API
 
 | Export | Purpose |
@@ -316,6 +422,11 @@ regression (no live token ever survives in a revoked family).
 | `generateOpaqueToken()` / `hashOpaqueToken(t)` | Random 256-bit token / its SHA-256 hash. |
 | `verifyOpaqueToken(raw, storedHash)` | Constant-time verification. |
 | `generateResetToken` / `hashResetToken` | Aliases of the opaque-token pair. |
+| `SingleUseTokenStore` | The storage port to implement (`issue`, `consume`, `invalidateAllFor`). `consume` MUST be atomic. |
+| `issueSingleUseToken(store, { purpose, subjectId, ttlMs, now? })` | Mints a token, persists only its hash. `→ { rawToken, id, expiresAt }`. |
+| `redeemSingleUseToken(store, rawToken, { purpose, now? })` | Atomic, single-use, purpose-scoped redeem. `→ { outcome: 'redeemed'\|'already-consumed'\|'expired'\|'invalid', ... }`. |
+| `createMemorySingleUseTokenStore()` | In-memory `SingleUseTokenStore` — test double, not for production. |
+| `runSingleUseTokenStoreConformanceTests(makeStore, { describe, it, expect }, opts?)` | From `@andrewpopov/auth-kit/conformance`. Adapter conformance suite — run against a REAL store before trusting it. |
 | `DEFAULT_BCRYPT_ROUNDS` | `12`. |
 | `RefreshTokenStore` | The storage port to implement (`createSession`, `findByHash`, `rotate`, `revokeFamily`, `revokeAllForUser`, `getEpoch`, `bumpEpoch`). |
 | `createRefreshToken(store, userId, ttlMs, opts?)` | Issue a token, starting a new family. |

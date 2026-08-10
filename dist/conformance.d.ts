@@ -1,4 +1,4 @@
-import { type AccountIdentityRecord, type ExternalIdentityStore, type RefreshTokenStore } from './index';
+import { type AccountIdentityRecord, type ExternalIdentityStore, type RefreshTokenStore, type SingleUseTokenStore } from './index';
 /** The subset of `expect(...)`'s chainable API this suite uses — structurally satisfied by vitest's and Jest's `expect` (both are duck-typed, not imported). */
 export interface ExpectLike {
     (actual: unknown): {
@@ -15,6 +15,9 @@ export interface ExpectLike {
         };
         resolves: {
             toBeUndefined(): Promise<void>;
+        };
+        rejects: {
+            toThrow(expected?: unknown): Promise<void>;
         };
     };
 }
@@ -79,6 +82,38 @@ export declare function runRefreshTokenStoreConformanceTests(makeStore: () => Re
  * database; no fake in-memory store proves database uniqueness or CAS safety.
  */
 export declare function runExternalIdentityStoreConformanceTests(makeStore: () => ExternalIdentityStore | Promise<ExternalIdentityStore>, prepare: (store: ExternalIdentityStore) => IdentityStoreConformancePreparation | Promise<IdentityStoreConformancePreparation>, harness: ConformanceTestHarness, options?: {
+    concurrency?: number;
+    raceRepeats?: number;
+}): void;
+/**
+ * SingleUseTokenStore PORT CONFORMANCE SUITE. Every adapter author
+ * (Prisma/pg/Drizzle/whatever) MUST run this against their REAL backing
+ * store before trusting it.
+ *
+ * *** Passing this suite against `createMemorySingleUseTokenStore()` proves
+ * NOTHING about a real adapter's atomicity. *** The in-memory store's
+ * `consume()` is `async` but awaits nothing, so under Node's run-to-completion
+ * semantics it is atomic "for free" — every property below holds even with
+ * ZERO locking, because JavaScript is single-threaded, not because the
+ * algorithm is sound. A real database can — and on Postgres at READ
+ * COMMITTED, WILL — let two concurrent `consume()` calls on the same hash
+ * both "win" (a classic lost update) unless the adapter's transaction uses
+ * `SELECT ... FOR UPDATE` (or an equivalent atomic compare-and-swap, e.g. a
+ * conditional `UPDATE ... WHERE token_hash = $h AND purpose = $p AND
+ * consumed_at IS NULL AND expires_at > $now RETURNING *`) around the whole
+ * decide-and-act sequence documented on {@link SingleUseTokenStore.consume}.
+ *
+ * Usage, from the adapter package's own vitest (or Jest) test file:
+ *
+ * ```ts
+ * import { describe, it, expect } from 'vitest';
+ * import { runSingleUseTokenStoreConformanceTests } from '@andrewpopov/auth-kit/conformance';
+ * import { createMyPostgresStore } from '../src/postgres-store';
+ *
+ * runSingleUseTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { describe, it, expect });
+ * ```
+ */
+export declare function runSingleUseTokenStoreConformanceTests(makeStore: () => SingleUseTokenStore | Promise<SingleUseTokenStore>, harness: ConformanceTestHarness, options?: {
     concurrency?: number;
     raceRepeats?: number;
 }): void;

@@ -6,12 +6,16 @@ import {
   resolveExternalIdentity,
   hashOpaqueToken,
   generateOpaqueToken,
+  issueSingleUseToken,
+  redeemSingleUseToken,
   DEFAULT_ROTATION_GRACE_MS,
   type AccountIdentityPolicy,
   type AccountIdentityRecord,
   type ExternalIdentity,
   type ExternalIdentityStore,
   type RefreshTokenStore,
+  type SingleUseTokenRecord,
+  type SingleUseTokenStore,
 } from './index';
 
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -32,6 +36,9 @@ export interface ExpectLike {
     };
     resolves: {
       toBeUndefined(): Promise<void>;
+    };
+    rejects: {
+      toThrow(expected?: unknown): Promise<void>;
     };
   };
 }
@@ -372,6 +379,293 @@ export function runExternalIdentityStoreConformanceTests(
           expect(finalAccount).not.toBeNull();
           expect(finalAccount!.emailVerified).toBe(true);
         }
+      },
+    );
+  });
+}
+
+const SINGLE_USE_TTL_MS = 15 * 60 * 1000; // a typical password-reset window
+
+/**
+ * SingleUseTokenStore PORT CONFORMANCE SUITE. Every adapter author
+ * (Prisma/pg/Drizzle/whatever) MUST run this against their REAL backing
+ * store before trusting it.
+ *
+ * *** Passing this suite against `createMemorySingleUseTokenStore()` proves
+ * NOTHING about a real adapter's atomicity. *** The in-memory store's
+ * `consume()` is `async` but awaits nothing, so under Node's run-to-completion
+ * semantics it is atomic "for free" — every property below holds even with
+ * ZERO locking, because JavaScript is single-threaded, not because the
+ * algorithm is sound. A real database can — and on Postgres at READ
+ * COMMITTED, WILL — let two concurrent `consume()` calls on the same hash
+ * both "win" (a classic lost update) unless the adapter's transaction uses
+ * `SELECT ... FOR UPDATE` (or an equivalent atomic compare-and-swap, e.g. a
+ * conditional `UPDATE ... WHERE token_hash = $h AND purpose = $p AND
+ * consumed_at IS NULL AND expires_at > $now RETURNING *`) around the whole
+ * decide-and-act sequence documented on {@link SingleUseTokenStore.consume}.
+ *
+ * Usage, from the adapter package's own vitest (or Jest) test file:
+ *
+ * ```ts
+ * import { describe, it, expect } from 'vitest';
+ * import { runSingleUseTokenStoreConformanceTests } from '@andrewpopov/auth-kit/conformance';
+ * import { createMyPostgresStore } from '../src/postgres-store';
+ *
+ * runSingleUseTokenStoreConformanceTests(() => createMyPostgresStore(testDb), { describe, it, expect });
+ * ```
+ */
+export function runSingleUseTokenStoreConformanceTests(
+  makeStore: () => SingleUseTokenStore | Promise<SingleUseTokenStore>,
+  harness: ConformanceTestHarness,
+  options?: { concurrency?: number; raceRepeats?: number },
+): void {
+  const { describe, it, expect } = harness;
+  const concurrency = options?.concurrency ?? 20;
+  // Used by both race cases below. `Promise.all` gives GENUINE concurrency
+  // (real overlapping I/O against a real adapter) but no barrier between an
+  // adapter's internal read and write phases, so a non-atomic adapter can
+  // still pass a single round by scheduling luck (e.g. a connection pool
+  // that happens to serialize the calls). Repeating the race over fresh
+  // state makes a lucky pass across every round unlikely, not impossible —
+  // this is a PROBABILISTIC canary, not a proof of atomicity.
+  const raceRepeats = options?.raceRepeats ?? 5;
+
+  if (!Number.isInteger(concurrency) || concurrency < 2) {
+    throw new Error(
+      `runSingleUseTokenStoreConformanceTests: concurrency must be an integer >= 2 (got ${concurrency}) — a suite run ` +
+        'with concurrency 1 (or a non-finite value like NaN, which passes a bare `< 2` check) would "pass" while ' +
+        'testing nothing, which is worse than not running it.',
+    );
+  }
+  if (!Number.isInteger(raceRepeats) || raceRepeats < 1) {
+    throw new Error(
+      `runSingleUseTokenStoreConformanceTests: raceRepeats must be an integer >= 1 (got ${raceRepeats}) — a suite run ` +
+        'with raceRepeats 0 (or a non-finite value like NaN, which passes a bare `< 1` check) would register the race ' +
+        'case but run zero rounds of it, passing vacuously, which is worse than not running it.',
+    );
+  }
+
+  describe('SingleUseTokenStore conformance', () => {
+    it('happy path: redeems, with the issued purpose/subjectId and consumedAt === now on the record', async () => {
+      const store = await makeStore();
+      const issued = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: 'user-1', ttlMs: SINGLE_USE_TTL_MS });
+      const now = new Date();
+
+      const result = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset', now });
+      expect(result.outcome).toBe('redeemed');
+      if (result.outcome !== 'redeemed') throw new Error('unreachable');
+      expect(result.record.purpose).toBe('password-reset');
+      expect(result.record.subjectId).toBe('user-1');
+      expect(result.record.consumedAt).toEqual(now);
+    });
+
+    it('redeemSingleUseToken(): an unknown token hash -> invalid', async () => {
+      const store = await makeStore();
+      const result = await redeemSingleUseToken(store, 'not-a-real-token', { purpose: 'password-reset' });
+      expect(result.outcome).toBe('invalid');
+    });
+
+    it('sequential replay of the same token -> already-consumed, not redeemed again', async () => {
+      const store = await makeStore();
+      const issued = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: 'user-1', ttlMs: SINGLE_USE_TTL_MS });
+
+      const first = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset' });
+      expect(first.outcome).toBe('redeemed');
+
+      const second = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset' });
+      expect(second.outcome).toBe('already-consumed');
+    });
+
+    it(
+      `consume(): single-use under GENUINE concurrency, repeated ${raceRepeats}x over fresh tokens — N parallel ` +
+        'store.consume() calls on the SAME token hash, asserting exactly one `consumed` AND exactly N-1 ' +
+        '`already-consumed` each round (counting winners alone would let an adapter that reports losers as ' +
+        '`not-found`/`expired` slip past this suite). This is the assertion a naive read-then-write adapter fails ' +
+        'under real concurrent connections, even though it passes trivially against the in-memory store. ' +
+        'PROBABILISTIC, like the identity suite\'s placeholder-claim canary: Promise.all provides concurrency, not ' +
+        'a read/write barrier, so a genuinely non-atomic adapter could still pass any single round by scheduling ' +
+        'luck — repeating over fresh tokens makes that unlikely across every round, not impossible.',
+      async () => {
+        const store = await makeStore();
+
+        for (let round = 0; round < raceRepeats; round++) {
+          const issued = await issueSingleUseToken(store, {
+            purpose: 'password-reset',
+            subjectId: `user-consume-race-${round}`,
+            ttlMs: SINGLE_USE_TTL_MS,
+          });
+          const tokenHash = hashOpaqueToken(issued.rawToken);
+
+          const attempts = await Promise.all(
+            Array.from({ length: concurrency }, () => store.consume(tokenHash, { purpose: 'password-reset', now: new Date() })),
+          );
+          const consumedCount = attempts.filter(result => result.status === 'consumed').length;
+          const alreadyConsumedCount = attempts.filter(result => result.status === 'already-consumed').length;
+          expect(consumedCount).toBe(1);
+          expect(alreadyConsumedCount).toBe(concurrency - 1);
+        }
+      },
+    );
+
+    it(
+      'invalidateAllFor() resolving BEFORE consume() is called: DETERMINISTIC, no ordering ambiguity — once ' +
+        'invalidateAllFor() has fully resolved, the linearization requirement (its commit is the linearization ' +
+        'point — see {@link SingleUseTokenStore.consume}) is completely observable through this port, so a ' +
+        'subsequent consume() on a token it covered MUST report `already-consumed`, never `consumed`. This is the ' +
+        'case a non-atomic read-then-write consume() (one that already read the row before invalidateAllFor() ' +
+        'committed, in the SAME call) cannot be caught by directly — see the concurrent variant below for that.',
+      async () => {
+        const store = await makeStore();
+        const subjectId = 'user-invalidate-then-consume';
+        const issued = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId, ttlMs: SINGLE_USE_TTL_MS });
+        const tokenHash = hashOpaqueToken(issued.rawToken);
+
+        await store.invalidateAllFor(subjectId, 'password-reset');
+
+        const result = await store.consume(tokenHash, { purpose: 'password-reset', now: new Date() });
+        expect(result.status).toBe('already-consumed');
+      },
+    );
+
+    it(
+      `consume() racing invalidateAllFor() on the same subject+purpose, repeated ${raceRepeats}x over fresh tokens — ` +
+        'a SMOKE TEST that the two operations do not corrupt each other under real concurrent I/O. This is NOT a ' +
+        'linearization proof: through this port there is no way to observe which of the two committed first, so a ' +
+        'consume() that reads the row before invalidateAllFor() commits and then WRITES after it commits — the exact ' +
+        'linearization violation the contract forbids — is indistinguishable here from a legitimate win, because ' +
+        '`raceResult.status === \'consumed\'` is accepted either way. A real proof would need an adapter ' +
+        'synchronization hook (a way to pause a transaction mid-flight so the test can force the interleaving) that ' +
+        'this port does not expose; the deterministic case above is what actually gates that violation. What this ' +
+        'case DOES assert: both calls resolve without throwing, and the store is left internally consistent ' +
+        'afterward (a follow-up consume() reports a well-formed status, `consumed` or `already-consumed`, not a ' +
+        'result the token retirement makes impossible).',
+      async () => {
+        const store = await makeStore();
+
+        for (let round = 0; round < raceRepeats; round++) {
+          const subjectId = `user-invalidate-race-${round}`;
+          const issued = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId, ttlMs: SINGLE_USE_TTL_MS });
+          const tokenHash = hashOpaqueToken(issued.rawToken);
+
+          const [raceResult] = await Promise.all([
+            store.consume(tokenHash, { purpose: 'password-reset', now: new Date() }),
+            store.invalidateAllFor(subjectId, 'password-reset'),
+          ]);
+          expect(['consumed', 'already-consumed']).toContain(raceResult.status);
+
+          const after = await store.consume(tokenHash, { purpose: 'password-reset', now: new Date() });
+          expect(after.status).toBe('already-consumed');
+        }
+      },
+    );
+
+    it('expiry is decided INSIDE the atomic consume(): a token past expiresAt -> expired, and advancing time keeps it expired', async () => {
+      const store = await makeStore();
+      const issuedAt = new Date('2026-01-01T00:00:00.000Z');
+      const issued = await issueSingleUseToken(store, {
+        purpose: 'password-reset',
+        subjectId: 'user-1',
+        ttlMs: SINGLE_USE_TTL_MS,
+        now: issuedAt,
+      });
+
+      const afterExpiry = new Date(issued.expiresAt.getTime() + 1);
+      const first = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset', now: afterExpiry });
+      expect(first.outcome).toBe('expired');
+
+      // Expiry must not have consumed the token (nothing written) — but it
+      // must ALSO never become redeemable again as real time keeps advancing.
+      const later = new Date(issued.expiresAt.getTime() + 10_000);
+      const second = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset', now: later });
+      expect(second.outcome).toBe('expired');
+    });
+
+    it('the expiry boundary is inclusive: consuming at exactly now === expiresAt -> expired', async () => {
+      const store = await makeStore();
+      const issuedAt = new Date('2026-01-01T00:00:00.000Z');
+      const issued = await issueSingleUseToken(store, {
+        purpose: 'password-reset',
+        subjectId: 'user-1',
+        ttlMs: SINGLE_USE_TTL_MS,
+        now: issuedAt,
+      });
+
+      const atExpiry = new Date(issued.expiresAt.getTime());
+      const result = await redeemSingleUseToken(store, issued.rawToken, { purpose: 'password-reset', now: atExpiry });
+      expect(result.outcome).toBe('expired');
+    });
+
+    it('purpose isolation: consuming under the wrong purpose -> purpose-mismatch with nothing written, proven by the token still consuming under its real purpose afterwards', async () => {
+      const store = await makeStore();
+      const issued = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: 'user-1', ttlMs: SINGLE_USE_TTL_MS });
+      const tokenHash = hashOpaqueToken(issued.rawToken);
+
+      const wrongPurpose = await store.consume(tokenHash, { purpose: 'invite', now: new Date() });
+      expect(wrongPurpose.status).toBe('purpose-mismatch');
+
+      // Nothing was written — the token still consumes under its real purpose.
+      const realPurpose = await store.consume(tokenHash, { purpose: 'password-reset', now: new Date() });
+      expect(realPurpose.status).toBe('consumed');
+    });
+
+    it('invalidateAllFor(): retires outstanding tokens for that subject+purpose only, leaves other subjects/purposes redeemable, is idempotent, and a retired token reads already-consumed (never not-found)', async () => {
+      const store = await makeStore();
+      const target = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: 'user-1', ttlMs: SINGLE_USE_TTL_MS });
+      const otherSubject = await issueSingleUseToken(store, { purpose: 'password-reset', subjectId: 'user-2', ttlMs: SINGLE_USE_TTL_MS });
+      const otherPurpose = await issueSingleUseToken(store, { purpose: 'invite', subjectId: 'user-1', ttlMs: SINGLE_USE_TTL_MS });
+
+      await store.invalidateAllFor('user-1', 'password-reset');
+      await expect(store.invalidateAllFor('user-1', 'password-reset')).resolves.toBeUndefined(); // idempotent — must not throw or double-act
+
+      const targetResult = await store.consume(hashOpaqueToken(target.rawToken), { purpose: 'password-reset', now: new Date() });
+      expect(targetResult.status).toBe('already-consumed'); // not-found would betray deletion
+
+      const otherSubjectResult = await store.consume(hashOpaqueToken(otherSubject.rawToken), { purpose: 'password-reset', now: new Date() });
+      expect(otherSubjectResult.status).toBe('consumed');
+
+      const otherPurposeResult = await store.consume(hashOpaqueToken(otherPurpose.rawToken), { purpose: 'invite', now: new Date() });
+      expect(otherPurposeResult.status).toBe('consumed');
+    });
+
+    it('issue(): rejects a duplicate tokenHash', async () => {
+      const store = await makeStore();
+      const record: SingleUseTokenRecord = {
+        id: crypto.randomUUID(),
+        purpose: 'password-reset',
+        subjectId: 'user-1',
+        tokenHash: hashOpaqueToken(generateOpaqueToken()),
+        expiresAt: new Date(Date.now() + SINGLE_USE_TTL_MS),
+        consumedAt: null,
+      };
+      await store.issue(record);
+      await expect(store.issue({ ...record, id: crypto.randomUUID() })).rejects.toThrow();
+    });
+
+    it(
+      `issue(): tokenHash uniqueness under GENUINE concurrency — issuing the SAME tokenHash from ${concurrency} ` +
+        'parallel callers, exactly one succeeds and the rest reject. The sequential duplicate-tokenHash case above ' +
+        'cannot catch a non-atomic check-then-insert adapter: it can let two rows share a tokenHash when the checks ' +
+        'race, and the uniqueness invariant exists precisely so that never happens — two rows sharing a hash would ' +
+        'let two concurrent consume() calls each win a DIFFERENT row, the exact double-redeem the whole ' +
+        'consume()-atomicity contract is meant to prevent.',
+      async () => {
+        const store = await makeStore();
+        const tokenHash = hashOpaqueToken(generateOpaqueToken());
+
+        const attempts = await Promise.allSettled(
+          Array.from({ length: concurrency }, () =>
+            store.issue({
+              id: crypto.randomUUID(),
+              purpose: 'password-reset',
+              subjectId: 'user-issue-race',
+              tokenHash,
+              expiresAt: new Date(Date.now() + SINGLE_USE_TTL_MS),
+              consumedAt: null,
+            }),
+          ),
+        );
+        const succeeded = attempts.filter((result) => result.status === 'fulfilled').length;
+        expect(succeeded).toBe(1);
       },
     );
   });
