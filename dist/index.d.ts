@@ -54,9 +54,17 @@ export interface PasswordHasher {
     /** Verify a password against a stored hash. */
     verify(password: string, hash: string): Promise<boolean>;
     /**
-     * A valid bcrypt hash that no real password matches, computed once. Compare an
-     * incoming password against it on the account-absent / no-password branch so
-     * login timing stays uniform and leaks no account-existence signal.
+     * A valid bcrypt hash of a random, internally-generated plaintext that this
+     * package never exposes — computed once, then cached. Compare an incoming
+     * password against it on the account-absent / no-password branch so login
+     * timing stays uniform and leaks no account-existence signal. No password a
+     * caller passes to `hash`/`verify` can ever match it.
+     *
+     * Caveat: `bcrypt` is injected (see {@link PasswordHasherOptions.bcrypt}),
+     * so a host that wraps its own bcrypt implementation can observe the
+     * plaintext handed to it here, same as it can for every real `hash`/
+     * `verify` call. That's not a new capability the dummy hash grants — a host
+     * in that position already controls all password hashing in the process.
      */
     dummyHash(): string;
 }

@@ -283,10 +283,18 @@ export function runExternalIdentityStoreConformanceTests(
   makeStore: () => ExternalIdentityStore | Promise<ExternalIdentityStore>,
   prepare: (store: ExternalIdentityStore) => IdentityStoreConformancePreparation | Promise<IdentityStoreConformancePreparation>,
   harness: ConformanceTestHarness,
-  options?: { concurrency?: number },
+  options?: { concurrency?: number; raceRepeats?: number },
 ): void {
   const { describe, it, expect } = harness;
   const concurrency = options?.concurrency ?? 20;
+  // Used by the placeholder-claim race below. `Promise.all` gives GENUINE
+  // concurrency (real overlapping I/O against a real adapter) but no barrier
+  // between an adapter's internal read and write phases, so a non-atomic
+  // adapter can still pass a single round by scheduling luck (e.g. a
+  // connection pool that happens to serialize the calls). Repeating the race
+  // over fresh state makes a lucky pass across every round unlikely, not
+  // impossible — this is a PROBABILISTIC canary, not a proof of atomicity.
+  const raceRepeats = options?.raceRepeats ?? 5;
 
   describe('ExternalIdentityStore conformance', () => {
     it('resolves a returning identity by issuer + subject, not email', async () => {
@@ -329,5 +337,42 @@ export function runExternalIdentityStoreConformanceTests(
       const owner = await store.findAccountByExternalIdentity(conformanceIdentity);
       expect(owner).not.toBeNull();
     });
+
+    it(
+      `claimPlaceholder single-use under real concurrency, repeated ${raceRepeats}x over fresh placeholders: N parallel ` +
+        'claimPlaceholder() calls on the SAME placeholder, exactly one succeeds each round (mirrors the bind-race canary ' +
+        'above, but for claimPlaceholder — a select-then-update claimPlaceholder can let two concurrent callers both ' +
+        '"win" the same placeholder). Deliberately races ONE placeholder per round, not several sharing an email — ' +
+        'several placeholders with the same normalized email would spuriously fail against an otherwise-conforming ' +
+        'adapter that enforces email uniqueness, which is worse than the atomicity gap this canary exists to catch. ' +
+        'PROBABILISTIC, like the concurrency canary above: a genuinely non-atomic adapter could still pass any single ' +
+        'round by scheduling luck (Promise.all provides concurrency, not a read/write barrier) — repeating over fresh ' +
+        'placeholders makes that unlikely across every round, not impossible.',
+      async () => {
+        const store = await makeStore();
+        const fixture = await prepare(store);
+
+        for (let round = 0; round < raceRepeats; round++) {
+          const id = `identity-claim-race-${round}`;
+          const roundIdentity: ExternalIdentity = {
+            ...conformanceIdentity,
+            subject: `${conformanceIdentity.subject}-claim-race-${round}`,
+            email: `identity-claim-race-${round}@example.test`,
+          };
+          await fixture.createAccount({ id, email: roundIdentity.email, emailVerified: false, disabled: false, hasCredentials: false });
+
+          const attempts = await Promise.all(
+            Array.from({ length: concurrency }, () => store.claimPlaceholder(id, roundIdentity)),
+          );
+          expect(attempts.filter(result => result.status === 'claimed').length).toBe(1);
+
+          // Re-read the account rather than trust the return values alone:
+          // the mutation must have actually landed exactly once.
+          const finalAccount = await store.findAccountById(id);
+          expect(finalAccount).not.toBeNull();
+          expect(finalAccount!.emailVerified).toBe(true);
+        }
+      },
+    );
   });
 }

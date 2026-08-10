@@ -80,4 +80,5 @@ export declare function runRefreshTokenStoreConformanceTests(makeStore: () => Re
  */
 export declare function runExternalIdentityStoreConformanceTests(makeStore: () => ExternalIdentityStore | Promise<ExternalIdentityStore>, prepare: (store: ExternalIdentityStore) => IdentityStoreConformancePreparation | Promise<IdentityStoreConformancePreparation>, harness: ConformanceTestHarness, options?: {
     concurrency?: number;
+    raceRepeats?: number;
 }): void;

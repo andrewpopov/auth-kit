@@ -4,8 +4,11 @@ import {
   resolveExternalIdentity,
   type AccountIdentityPolicy,
   type AccountIdentityRecord,
+  type BindResult,
   type ExternalIdentity,
   type ExternalIdentityStore,
+  type IdentityAuditEvent,
+  type IdentityAuditSink,
 } from '../index';
 
 const google = (overrides: Partial<ExternalIdentity> = {}): ExternalIdentity => ({
@@ -44,6 +47,23 @@ class MemoryStore implements ExternalIdentityStore {
     const account = { id: `new-${this.accounts.size + 1}`, email: identity.email, emailVerified: true, disabled: false, hasCredentials: false };
     this.accounts.set(account.id, account); this.identities.set(this.key(identity), account.id); return account;
   }
+}
+
+/** A minimal store whose `bindExternalIdentity` always returns a fixed, forced result — for exercising store outcomes (`not-eligible`, `account-already-linked`) MemoryStore's own bind logic never produces. */
+function storeWithBindResult(account: AccountIdentityRecord, bindResult: BindResult): ExternalIdentityStore {
+  return {
+    async findAccountByExternalIdentity() { return null; },
+    async findAccountById(id) { return id === account.id ? account : null; },
+    async findAccountByNormalizedEmail() { return null; },
+    async bindExternalIdentity() { return bindResult; },
+    async claimPlaceholder() { throw new Error('not used in this test'); },
+    async provisionAccount() { throw new Error('not used in this test'); },
+  };
+}
+
+function collectingSink(): { sink: IdentityAuditSink; events: IdentityAuditEvent[] } {
+  const events: IdentityAuditEvent[] = [];
+  return { sink: { record: (event) => { events.push(event); } }, events };
 }
 
 const policy: AccountIdentityPolicy = {
@@ -96,6 +116,128 @@ describe('external identity resolution', () => {
     ]);
     await store.bindExternalIdentity('u2', google());
     await expect(linkExternalIdentity(store, policy, 'u1', google())).resolves.toEqual({ outcome: 'identity-in-use' });
+  });
+});
+
+describe('linkExternalIdentity: not-eligible outcome (Finding 1)', () => {
+  it('surfaces not-eligible distinctly from identity-in-use when the store refuses the bind as ineligible', async () => {
+    const account: AccountIdentityRecord = { id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true };
+    const store = storeWithBindResult(account, { status: 'not-eligible' });
+    const result = await linkExternalIdentity(store, policy, 'u1', google());
+    expect(result).toEqual({ outcome: 'not-eligible' });
+  });
+});
+
+describe('linkExternalIdentity: audit trail (Finding 2)', () => {
+  it('audits a disabled-account refusal', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: true, hasCredentials: true }]);
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toMatchObject({ outcome: 'disabled' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity: google(), reason: 'disabled' }]);
+  });
+
+  it('audits an unverified-email refusal', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
+    const { sink, events } = collectingSink();
+    const identity = google({ emailAuthority: 'none' });
+    await expect(linkExternalIdentity(store, policy, 'u1', identity, sink)).resolves.toEqual({ outcome: 'unverified-email' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity, reason: 'unverified-email' }]);
+  });
+
+  it('audits an email-mismatch refusal', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
+    const { sink, events } = collectingSink();
+    const identity = google({ email: 'attacker@example.test' });
+    await expect(linkExternalIdentity(store, policy, 'u1', identity, sink)).resolves.toMatchObject({ outcome: 'email-mismatch' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity, reason: 'email-mismatch' }]);
+  });
+
+  it('audits an identity-already-linked-to-another-account refusal', async () => {
+    const store = new MemoryStore([
+      { id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true },
+      { id: 'u2', email: 'other@example.test', emailVerified: true, disabled: false, hasCredentials: true },
+    ]);
+    await store.bindExternalIdentity('u2', google());
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toEqual({ outcome: 'identity-in-use' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity: google(), reason: 'identity-in-use' }]);
+  });
+
+  it('audits an account-already-linked refusal from the store', async () => {
+    const account: AccountIdentityRecord = { id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true };
+    const store = storeWithBindResult(account, { status: 'account-already-linked' });
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toEqual({ outcome: 'account-already-linked' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity: google(), reason: 'account-already-linked' }]);
+  });
+
+  it('audits the new not-eligible refusal from the store', async () => {
+    const account: AccountIdentityRecord = { id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true };
+    const store = storeWithBindResult(account, { status: 'not-eligible' });
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toEqual({ outcome: 'not-eligible' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'u1', identity: google(), reason: 'not-eligible' }]);
+  });
+
+  it('audits a not-found refusal, attributed to the ATTEMPTED account id (no real account exists)', async () => {
+    const store = new MemoryStore([]);
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'no-such-account', google(), sink)).resolves.toEqual({ outcome: 'not-found' });
+    expect(events).toEqual([{ type: 'EXTERNAL_IDENTITY_REFUSED', accountId: 'no-such-account', identity: google(), reason: 'not-found' }]);
+  });
+
+  it('does NOT audit a successful link', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toMatchObject({ outcome: 'linked' });
+    expect(events.filter(event => event.type === 'EXTERNAL_IDENTITY_REFUSED')).toEqual([]);
+  });
+
+  it('does NOT audit an idempotent already-linked re-link of the same account', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
+    await store.bindExternalIdentity('u1', google());
+    const { sink, events } = collectingSink();
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), sink)).resolves.toMatchObject({ outcome: 'already-linked' });
+    expect(events).toEqual([]);
+  });
+});
+
+describe('linkExternalIdentity: a broken audit sink never breaks the refusal outcome (Finding B)', () => {
+  it('a SYNCHRONOUSLY THROWING sink still lets the typed refusal outcome come back intact', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: true, hasCredentials: true }]);
+    const throwingSink: IdentityAuditSink = { record: () => { throw new Error('sink exploded'); } };
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), throwingSink)).resolves.toMatchObject({ outcome: 'disabled' });
+  });
+
+  it('an ASYNCHRONOUSLY REJECTING sink still lets the typed refusal outcome come back intact', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: true, hasCredentials: true }]);
+    const rejectingSink: IdentityAuditSink = { record: () => Promise.reject(new Error('sink exploded')) };
+    await expect(linkExternalIdentity(store, policy, 'u1', google(), rejectingSink)).resolves.toMatchObject({ outcome: 'disabled' });
+  });
+
+  it('surfaces (does not silently swallow) the sink failure via console.warn', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: true, hasCredentials: true }]);
+    const sinkError = new Error('sink exploded');
+    const throwingSink: IdentityAuditSink = { record: () => { throw sinkError; } };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(linkExternalIdentity(store, policy, 'u1', google(), throwingSink)).resolves.toMatchObject({ outcome: 'disabled' });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('audit sink failed'), sinkError);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a broken sink does not stop a SUCCESSFUL link from returning its outcome either (audit() is shared, not refuseLink-specific)', async () => {
+    const store = new MemoryStore([{ id: 'u1', email: 'owner@example.test', emailVerified: true, disabled: false, hasCredentials: true }]);
+    const throwingSink: IdentityAuditSink = { record: () => { throw new Error('sink exploded'); } };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(linkExternalIdentity(store, policy, 'u1', google(), throwingSink)).resolves.toMatchObject({ outcome: 'linked' });
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
