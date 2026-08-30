@@ -14,10 +14,11 @@ format.
 
    ```bash
    npm ci
-   npm run verify:dist-fresh
    npm run verify
-   npm audit --audit-level=high
    ```
+
+   `verify` includes type checking, tests, build, committed-`dist/` freshness,
+   and packed-consumer verification.
 
 3. **Cut the release:** `npm run release:cut` compiles the unreleased
    fragments into a new `## <version>` section at the top of `CHANGELOG.md`,
