@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.7.0
+
+- runExternalIdentityStoreConformanceTests adds a concurrent claimPlaceholder race, catching non-atomic placeholder-claim adapters the suite previously missed.
+  `runExternalIdentityStoreConformanceTests` already promised (in its own doc
+  comment) that `bindExternalIdentity` and `claimPlaceholder` must decide and
+  act atomically, but only `bindExternalIdentity` had a genuine concurrency
+  canary — `claimPlaceholder` was exercised only once, sequentially, so a
+  non-atomic adapter could pass the suite while violating the stated contract.
+  The suite now also races N concurrent `claimPlaceholder` calls against ONE
+  placeholder, repeated over fresh placeholders (a new `raceRepeats` option,
+  default 5), asserting exactly one claim wins each round. Adapter authors
+  should re-run the suite against their real store.
+  
+  Two refinements from the first pass: the race deliberately contends for a
+  SINGLE placeholder per round rather than several placeholders sharing one
+  normalized email — the latter spuriously fails against an otherwise-conforming
+  adapter that enforces email uniqueness. And the race is now documented as
+  PROBABILISTIC rather than implied-certain: `Promise.all` gives genuine
+  concurrency but no barrier between an adapter's internal read and write
+  phases, so a truly non-atomic adapter could still pass any single round by
+  scheduling luck — repeating over fresh state makes that unlikely across every
+  round, not impossible.
+- New SingleUseTokenStore port + issueSingleUseToken/redeemSingleUseToken lifecycle for atomic, single-use reset/invite/email-change tokens, plus a conformance suite for adapter authors.
+  Single-use opaque tokens (password reset, invite, email-change) previously
+  had no storage seam: `generateOpaqueToken`/`hashOpaqueToken`/`verifyOpaqueToken`
+  were pure and stateless, so "single-use" — the actual security property these
+  tokens exist to provide — was entirely the host's problem, and the README
+  documented redemption as a bare hash compare with no consume/retire step at
+  all. A new `SingleUseTokenStore` port closes that gap, mirroring
+  `RefreshTokenStore.rotate()`: `store.consume()` is a single atomic
+  decide-and-act operation that checks purpose, consumed state, and expiry
+  inside one transaction and reports `consumed` / `already-consumed` /
+  `expired` / `purpose-mismatch` / `not-found`, so two concurrent redeems of
+  the same token cannot both succeed. `issueSingleUseToken` and
+  `redeemSingleUseToken` are the algorithm layer against that port, and
+  `createMemorySingleUseTokenStore()` ships a test double. A
+  `runSingleUseTokenStoreConformanceTests` suite (from
+  `@andrewpopov/auth-kit/conformance`) is included for adapter authors to run
+  against their real store — passing it against the in-memory store proves
+  nothing about a real adapter's atomicity, same caveat as the refresh-token
+  suite.
+  
+  Replace-on-issue (invalidating an old reset/invite link when mailing a new
+  one) is deliberately **not** an atomic primitive: it's the host calling
+  `invalidateAllFor` then `issueSingleUseToken`, two separate calls, so a
+  concurrent issue can leave more than one live token outstanding and a failed
+  `issue` after a successful `invalidateAllFor` leaves no replacement. Hosts
+  that need that behavior own the non-atomicity explicitly; the port doesn't
+  claim a guarantee it can't keep.
+- the aggregate verification gate now rejects stale committed build output
+  `npm run verify` now invokes the existing `verify:dist-fresh` guard before
+  packing the package.
+- linkExternalIdentity surfaces a distinct not-eligible refusal (instead of the misleading identity-in-use), audits every explicit-link refusal reason including not-found, and never lets a broken audit sink break the returned outcome.
+  `ExplicitLinkResolution` gains a `not-eligible` outcome, and `linkExternalIdentity`
+  now maps a store's `not-eligible` `BindResult` to it directly instead of
+  collapsing it into `identity-in-use` — a caller no longer gets told "this
+  identity belongs to someone else" when the real reason is "this account isn't
+  eligible to link." Every refusal branch (`unverified-email`, `identity-in-use`,
+  `account-already-linked`, `not-eligible`, and `not-found` — an attempt to link
+  against an account id that does not resolve, audited against the ATTEMPTED
+  id since that mismatch is itself the interesting signal) now records an
+  `EXTERNAL_IDENTITY_REFUSED` audit event through one shared refusal path, so
+  security-relevant explicit-link refusals are no longer silently invisible to
+  audit consumers.
+  
+  The shared audit path also isolates a throwing/rejecting `IdentityAuditSink`:
+  previously, once refusals started routing through it, a broken sink turned an
+  otherwise-correct typed outcome into a rejected promise. A sink failure is now
+  caught and surfaced via `console.warn` (never silently dropped) instead of
+  propagating — the same isolate-then-surface guarantee express-security-kit's
+  `AuditBuffer` makes for its own sink.
+- createPasswordHasher's dummyHash() now hashes a random internal plaintext, so the documented guarantee that no CALLER-supplied password matches it is actually true.
+  `dummyHash()` previously hashed the fixed, public literal
+  `'absent-user-timing-padding'` — since that string lives in the package's own
+  source, it verified successfully against the returned hash, contradicting the
+  documented guarantee that "no real password matches" it. `dummyHash()` now
+  hashes a random 256-bit plaintext generated internally per hasher, never
+  retained or exposed, so the guarantee is now genuinely true. The value is
+  still computed once (via `hashSync`) and cached, so cost and timing
+  characteristics are unchanged, and it stays stable across repeated calls on
+  the same hasher.
+  
+  The doc comment is now precise rather than absolute: the guarantee covers
+  passwords passed to `hash`/`verify`. `bcrypt` is injected, so a host that
+  wraps its own bcrypt implementation can observe the plaintext handed to
+  `hashSync` here, same as it can for every real hash/verify call — that's not
+  a new capability, since such a host already controls all password hashing in
+  the process.
+
 ## 0.6.1
 
 - Release tooling bumped to release-kit v0.3.1
