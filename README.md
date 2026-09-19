@@ -25,6 +25,28 @@ cross-verifiable), and `/conformance` likewise takes your `describe`/`it`/
 ships ESM-only, with no CJS `require()` entry point at all, so importing it
 internally would break this package for any consumer resolving via CJS).
 
+## `auth-kit` vs `authz-kit`
+
+This package answers *who are you?*. Its sibling,
+[`authz-kit`](https://github.com/andrewpopov/authz-kit), answers *what may you
+do?*. Neither depends on the other, and most apps want both.
+
+|  | `auth-kit` | `authz-kit` |
+|---|---|---|
+| Answers | *Who are you?* | *What may you do?* |
+| Owns | Password hashing, single-use tokens, refresh-session rotation, OAuth/OIDC identity binding | Role ladders, typed action policy, scope inheritance, account-admin mutation decisions |
+| Shape | **Stateful** — protocols run against injected store/policy ports, with `/conformance` suites for real adapters | **Pure** — no store port, no cache, no I/O |
+
+The split is load-bearing, not cosmetic. `auth-kit` cannot do its job without
+storage seams — rotation and identity binding are stateful protocols. `authz-kit`'s
+entire security argument is that it has none, because its consumers deliberately
+re-read role rows from the database on every request; a store seam in that package
+would undercut the guarantee. Session rotation is also identical everywhere, while
+role vocabularies differ per app and per scope — one package is a shared algorithm,
+the other a shared shape over values the app already holds.
+
+A valid session is not a permission. Authenticate with one, decide with the other.
+
 ## Install
 
 ```
