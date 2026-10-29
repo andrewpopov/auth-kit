@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+- Installing from git no longer runs a full dependency install: the `prepare` script is gone (run `npm run hooks` once after cloning) and `build` is now `compile`
+  Git-pinned consumers no longer trigger nested installs in the clone. Run `npm run hooks` once after cloning to enable the pre-push gate; `npm run compile` replaces `npm run build`.
+- Update shared release notes tooling
+  Refresh the shared release notes package pins and lockfiles. Full release verification and production rollout remain with the next release candidate.
+
 ## 0.7.0
 
 - runExternalIdentityStoreConformanceTests adds a concurrent claimPlaceholder race, catching non-atomic placeholder-claim adapters the suite previously missed.

@@ -477,6 +477,7 @@ credentials or state are issued.
 
 ```bash
 npm ci
+npm run hooks
 npm run verify
 npm audit --omit=dev --audit-level=high
 ```
