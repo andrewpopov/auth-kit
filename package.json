@@ -40,20 +40,20 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "compile": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify:pack": "node scripts/verify-pack.mjs",
     "verify:dist-fresh": "node scripts/verify-dist-fresh.mjs",
-    "verify": "npm run typecheck && npm test && npm run build && npm run verify:dist-fresh && npm run verify:pack",
+    "verify": "npm run typecheck && npm test && npm run compile && npm run verify:dist-fresh && npm run verify:pack",
     "release:note": "release-kit note",
     "release:notes": "release-kit notes",
     "release:bump": "release-kit bump",
     "release:cut": "release-kit cut",
     "release:check": "release-kit check",
     "release:hygiene": "release-kit hygiene",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "hooks": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@andrewpopov/deploy-kit": "github:andrewpopov/deploy-kit#v0.25.0",
